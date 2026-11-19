@@ -12,6 +12,7 @@
 #define NOMINMAX
 #include <windows.h>
 #include <d3d11.h>
+#include <bcrypt.h>
 #include <dxgi.h>
 
 #include <algorithm>
@@ -19,6 +20,7 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
+#include <ctime>
 #include <deque>
 #include <functional>
 #include <map>
@@ -31,6 +33,7 @@
 #include "forwards.inc"   // #pragma comment(linker, "/export:...") forwarders
 
 #pragma comment(lib, "d3d11.lib")
+#pragma comment(lib, "bcrypt.lib")
 
 // ---------------------------------------------------------------------------
 // Paths, config, logging
@@ -172,6 +175,8 @@ struct StateExt {
     int smnetRef = -2;                 // registry ref to the installed SMNet table
     int smdataRef = -2;                // registry ref to the installed SMData table
     int smeventsRef = -2;              // registry ref to the installed SMEvents table
+    int smextRef = -2;                 // registry ref to the installed SMX table
+    bool smextFailed = false;
     bool smeventsFailed = false;
     bool smdataFailed = false;         // don't retry a broken install every second
 };
@@ -534,6 +539,7 @@ static int Api_AddCallbackHook(const char* callback, const char* handler) {
 #include "smnet_lua.inc"   // kSMNetLua, kSMNetLuaSize
 #include "smevents_lua.inc"  // kSMEventsLua, kSMEventsLuaSize (SMEvents)
 #include "smdata_lua.inc"  // kSMDataLua, kSMDataLuaSize (SMPlayerData)
+#include "smext_lua.inc"   // kSMExtLua, kSMExtLuaSize (SMExtensions)
 
 struct NetHandlerEntry { std::string mod, msg; int side; SMNetHandler fn; void* user; };
 static std::mutex g_netMutex;                          // guards everything below
@@ -694,7 +700,8 @@ static bool SDKInstalled(lua_State* L, int env, const char* global) {
 // Run an embedded SDK chunk in `env` (passing env as `...`) and keep a
 // registry ref to the global table it defines in *ref.
 static bool InstallSDK(lua_State* L, int env, const char* global, const unsigned char* code, size_t size,
-                       const char* chunkname, int* ref) {
+                       const char* chunkname, int* ref,
+                       const std::function<int(lua_State*)>& pushExtra = nullptr) {
     int top = g_lua.lua_gettop(L);
     g_lua.lua_pushcclosure(L, TracebackHandler, 0);
     if (g_lua.luaL_loadbufferx(L, (const char*)code, size, chunkname, "t") != 0) {
@@ -705,7 +712,8 @@ static bool InstallSDK(lua_State* L, int env, const char* global, const unsigned
     g_lua.lua_pushvalue(L, env);
     g_lua.lua_setfenv(L, -2);
     g_lua.lua_pushvalue(L, env);                       // the chunk's `...`
-    if (o_lua_pcall(L, 1, 0, top + 1) != 0) {
+    int nargs = 1 + (pushExtra ? pushExtra(L) : 0);
+    if (o_lua_pcall(L, nargs, 0, top + 1) != 0) {
         Log("%s: install error: %s", chunkname + 1, ValueToString(L, -1).c_str());
         g_lua.lua_settop(L, top);
         return false;
@@ -719,6 +727,9 @@ static bool InstallSDK(lua_State* L, int env, const char* global, const unsigned
     g_lua.lua_settop(L, top);
     return true;
 }
+
+static int PushExtNatives(lua_State* L);            // SMExtensions, below
+static void ApplyExtFns(lua_State* L, const std::string* only);
 
 // `env` is the stack index of the game env. Installs the SDK modules once per
 // env (only in worlds: the env must hold a game-mode class): SMNetworking,
@@ -765,6 +776,14 @@ static void EnsureSMNet(lua_State* L, int env) {
             Log("SMPlayerData installed in state %p", (void*)L);
         else
             ext->smdataFailed = true;
+    }
+    if (!ext->smextFailed && !SDKInstalled(L, env, "SMX")) {
+        if (InstallSDK(L, env, "SMX", kSMExtLua, kSMExtLuaSize, "=SMExtensions", &ext->smextRef, PushExtNatives)) {
+            Log("SMExtensions installed in state %p", (void*)L);
+            ApplyExtFns(L, nullptr);
+        } else {
+            ext->smextFailed = true;
+        }
     }
     CallSMNet(L, "__scan", [](lua_State*) { return 0; });
     CallSMData(L, "__scan", [](lua_State*) { return 0; });
@@ -961,6 +980,330 @@ static int Api_EventEmitTo(int target, const char* name, const char* json) {
             return 3;
         });
     }) ? 1 : 0;
+}
+
+// ---------------------------------------------------------------------------
+// SMExtensions (native API v3): natives for loader/sdk/smext.lua, native
+// functions callable from Lua, sandboxed per-mod files.
+// ---------------------------------------------------------------------------
+struct ExtFnEntry { std::string name; SMExtFn fn; lua_CFunction raw; void* user; };
+static std::vector<ExtFnEntry> g_extFns;               // guarded by g_netMutex
+static std::map<std::string, std::string> g_extTokens; // modId -> token (guarded by g_netMutex)
+static std::vector<std::string> g_modNames;            // loaded mod DLLs (set once by LoadMods)
+static const size_t kExtMaxWrite = 4u << 20;           // 4 MB per write
+static const unsigned long long kExtQuota = 64ull << 20; // 64 MB per mod folder
+
+static bool ValidModId(const std::string& m) {
+    if (m.empty() || m.size() > 64 || m == "." || m == "..") return false;
+    for (char c : m) if (!(isalnum((unsigned char)c) || c == '_' || c == '-' || c == '.')) return false;
+    return true;
+}
+
+// Relative path inside a mod folder: letters, digits, space, _ - . / only,
+// no "..", no empty components, no leading slash. "" allowed when allowEmpty.
+static bool ValidRelPath(const std::string& p, bool allowEmpty) {
+    if (p.empty()) return allowEmpty;
+    if (p.size() > 200 || p[0] == '/' || p.back() == '/') return false;
+    size_t start = 0;
+    while (start <= p.size()) {
+        size_t e = p.find('/', start);
+        std::string part = p.substr(start, e == std::string::npos ? std::string::npos : e - start);
+        if (part.empty() || part == "." || part == ".." || part.back() == '.' || part.back() == ' ') return false;
+        for (char c : part)
+            if (!(isalnum((unsigned char)c) || c == '_' || c == '-' || c == '.' || c == ' ')) return false;
+        if (e == std::string::npos) break;
+        start = e + 1;
+    }
+    return true;
+}
+
+static std::wstring ModDataDir(const std::string& mod) { return g_loaderDirW + L"\\data\\" + ToWide(mod); }
+
+static bool TokenMatches(const std::string& mod, const std::string& token) {
+    std::lock_guard<std::mutex> lk(g_netMutex);
+    auto it = g_extTokens.find(mod);
+    if (it == g_extTokens.end() || it->second.size() != token.size()) return false;
+    unsigned char diff = 0;                            // constant-time compare
+    for (size_t i = 0; i < token.size(); ++i) diff |= (unsigned char)(it->second[i] ^ token[i]);
+    return diff == 0;
+}
+
+static unsigned long long FolderSize(const std::wstring& dir) {
+    unsigned long long total = 0;
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW((dir + L"\\*").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    do {
+        if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..")) continue;
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) total += FolderSize(dir + L"\\" + fd.cFileName);
+        else total += ((unsigned long long)fd.nFileSizeHigh << 32) | fd.nFileSizeLow;
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    return total;
+}
+
+static void MakeDirs(const std::wstring& base, const std::string& rel) {
+    CreateDirectoryW((g_loaderDirW + L"\\data").c_str(), nullptr);
+    CreateDirectoryW(base.c_str(), nullptr);
+    std::wstring cur = base;
+    size_t start = 0, e;
+    while ((e = rel.find('/', start)) != std::string::npos) {
+        cur += L"\\" + ToWide(rel.substr(start, e - start));
+        CreateDirectoryW(cur.c_str(), nullptr);
+        start = e + 1;
+    }
+}
+
+static int PushFail(lua_State* L, const char* msg) { g_lua.lua_pushnil(L); g_lua.lua_pushstring(L, msg); return 2; }
+
+static int X_log(lua_State* L) { Log("[lua] %s", StackString(L, 1).c_str()); return 0; }
+
+static int X_clock(lua_State* L) {
+    static LARGE_INTEGER freq = [] { LARGE_INTEGER f; QueryPerformanceFrequency(&f); return f; }();
+    LARGE_INTEGER now; QueryPerformanceCounter(&now);
+    g_lua.lua_pushnumber(L, (double)now.QuadPart * 1000.0 / (double)freq.QuadPart);
+    return 1;
+}
+
+static int X_date(lua_State* L) {
+    std::string fmt = StackString(L, 1);
+    if (fmt.empty() || fmt.size() > 128) fmt = "%Y-%m-%d %H:%M:%S";
+    time_t t = g_lua.lua_type(L, 2) == LUA_TNUMBER ? (time_t)g_lua.lua_tonumber(L, 2) : time(nullptr);
+    struct tm tmv;
+    char buf[256] = {0};
+    if (localtime_s(&tmv, &t) == 0) strftime(buf, sizeof buf, fmt.c_str(), &tmv);
+    g_lua.lua_pushstring(L, buf);
+    return 1;
+}
+
+static int X_info(lua_State* L) {
+    g_lua.lua_createtable(L, 0, 3);
+    g_lua.lua_pushstring(L, SMLOADER_VERSION);
+    g_lua.lua_setfield(L, -2, "version");
+    g_lua.lua_pushinteger(L, SMLOADER_API_VERSION);
+    g_lua.lua_setfield(L, -2, "api");
+    g_lua.lua_createtable(L, (int)g_modNames.size(), 0);
+    for (size_t i = 0; i < g_modNames.size(); ++i) {
+        g_lua.lua_pushstring(L, g_modNames[i].c_str());
+        g_lua.lua_rawseti(L, -2, (int)i + 1);
+    }
+    g_lua.lua_setfield(L, -2, "mods");
+    return 1;
+}
+
+// compile(source, chunkname) -> function running in the game env | nil, err
+static int X_compile(lua_State* L) {
+    size_t n = 0;
+    const char* src = g_lua.lua_type(L, 1) == LUA_TSTRING ? g_lua.lua_tolstring(L, 1, &n) : nullptr;
+    std::string name = StackString(L, 2);
+    if (!src) return PushFail(L, "SMX.compile: source must be a string");
+    if (g_lua.luaL_loadbufferx(L, src, n, name.empty() ? "=SMX.compile" : name.c_str(), "t") != 0) {
+        std::string err = ValueToString(L, -1);
+        return PushFail(L, err.c_str());
+    }
+    StateExt* ext = GetExt(L);
+    if (ext && ext->smnetRef >= 0) {
+        g_lua.lua_rawgeti(L, LUA_REGISTRYINDEX, ext->smnetRef);
+        g_lua.lua_getfield(L, -1, "__env");
+        g_lua.lua_remove(L, -2);
+        if (g_lua.lua_type(L, -1) == LUA_TTABLE) g_lua.lua_setfenv(L, -2);
+        else g_lua.lua_settop(L, g_lua.lua_gettop(L) - 1);
+    }
+    return 1;
+}
+
+// call(name, argsJson) -> resultJson | nil, err
+static int X_call(lua_State* L) {
+    std::string name = StackString(L, 1), args = StackString(L, 2);
+    ExtFnEntry e{};
+    bool found = false;
+    {
+        std::lock_guard<std::mutex> lk(g_netMutex);
+        for (auto& f : g_extFns) if (f.name == name) { e = f; found = true; break; }
+    }
+    if (!found) return PushFail(L, ("no native function '" + name + "' (is its mod installed?)").c_str());
+    if (!e.fn) return PushFail(L, ("'" + name + "' is a raw function: call SMX.fn." + name + "(...) directly").c_str());
+    std::vector<char> buf(4096, 0);
+    int r;
+    try {
+        r = e.fn(args.data(), args.size(), buf.data(), buf.size(), e.user);
+        if (r >= (int)buf.size()) {
+            buf.assign((size_t)r + 1, 0);
+            r = e.fn(args.data(), args.size(), buf.data(), buf.size(), e.user);
+        }
+    } catch (...) {
+        return PushFail(L, ("native function '" + name + "' threw an exception").c_str());
+    }
+    if (r < 0) {
+        buf.back() = 0;
+        return PushFail(L, buf[0] ? buf.data() : ("native function '" + name + "' failed").c_str());
+    }
+    g_lua.lua_pushlstring(L, buf.data(), (size_t)std::min<int>(r, (int)buf.size() - 1));
+    return 1;
+}
+
+// keyDown(vk): only while a window of this process is in the foreground
+static int X_keyDown(lua_State* L) {
+    int vk = (int)g_lua.lua_tointeger(L, 1);
+    DWORD pid = 0;
+    HWND fg = GetForegroundWindow();
+    if (fg) GetWindowThreadProcessId(fg, &pid);
+    bool down = pid == GetCurrentProcessId() && vk > 0 && vk < 256 && (GetAsyncKeyState(vk) & 0x8000) != 0;
+    g_lua.lua_pushboolean(L, down ? 1 : 0);
+    return 1;
+}
+
+static int X_fsOk(lua_State* L) {
+    std::string mod = StackString(L, 1), token = StackString(L, 2);
+    g_lua.lua_pushboolean(L, ValidModId(mod) && !token.empty() && TokenMatches(mod, token) ? 1 : 0);
+    return 1;
+}
+
+// fs(op, mod, token, path, data)
+static int X_fs(lua_State* L) {
+    std::string op = StackString(L, 1), mod = StackString(L, 2), token = StackString(L, 3), path = StackString(L, 4);
+    if (!ValidModId(mod) || !TokenMatches(mod, token)) return PushFail(L, "SMX.files: access denied");
+    if (!ValidRelPath(path, op == "list")) return PushFail(L, ("SMX.files: invalid path '" + path + "'").c_str());
+    std::wstring base = ModDataDir(mod);
+    std::wstring rel = ToWide(path);
+    for (auto& c : rel) if (c == L'/') c = L'\\';
+    std::wstring full = rel.empty() ? base : base + L"\\" + rel;
+
+    if (op == "read") {
+        FILE* f = _wfopen(full.c_str(), L"rb");
+        if (!f) return PushFail(L, "not found");
+        std::string data;
+        char chunk[65536];
+        size_t got;
+        while ((got = fread(chunk, 1, sizeof chunk, f)) > 0) {
+            data.append(chunk, got);
+            if (data.size() > (16u << 20)) { fclose(f); return PushFail(L, "file too large (16 MB max)"); }
+        }
+        fclose(f);
+        g_lua.lua_pushlstring(L, data.data(), data.size());
+        return 1;
+    }
+    if (op == "write" || op == "append") {
+        size_t n = 0;
+        const char* data = g_lua.lua_type(L, 5) == LUA_TSTRING ? g_lua.lua_tolstring(L, 5, &n) : "";
+        if (n > kExtMaxWrite) return PushFail(L, "too much data in one write (4 MB max)");
+        if (FolderSize(base) + n > kExtQuota) return PushFail(L, "mod folder is full (64 MB max)");
+        MakeDirs(base, path);
+        FILE* f = _wfopen(full.c_str(), op == "write" ? L"wb" : L"ab");
+        if (!f) return PushFail(L, "can't open the file for writing");
+        size_t put = n ? fwrite(data, 1, n, f) : 0;
+        fclose(f);
+        if (put != n) return PushFail(L, "write failed (disk full?)");
+        g_lua.lua_pushboolean(L, 1);
+        return 1;
+    }
+    if (op == "exists") {
+        g_lua.lua_pushboolean(L, GetFileAttributesW(full.c_str()) != INVALID_FILE_ATTRIBUTES ? 1 : 0);
+        return 1;
+    }
+    if (op == "remove") {
+        DWORD a = GetFileAttributesW(full.c_str());
+        if (a == INVALID_FILE_ATTRIBUTES) return PushFail(L, "not found");
+        BOOL ok = (a & FILE_ATTRIBUTE_DIRECTORY) ? RemoveDirectoryW(full.c_str()) : DeleteFileW(full.c_str());
+        if (!ok) return PushFail(L, "can't remove it (a folder must be empty)");
+        g_lua.lua_pushboolean(L, 1);
+        return 1;
+    }
+    if (op == "list") {
+        g_lua.lua_createtable(L, 0, 0);
+        WIN32_FIND_DATAW fd;
+        HANDLE h = FindFirstFileW((full + L"\\*").c_str(), &fd);
+        int i = 0;
+        if (h != INVALID_HANDLE_VALUE) {
+            do {
+                if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..")) continue;
+                std::string nm = ToUtf8(fd.cFileName);
+                if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) nm += "/";
+                g_lua.lua_pushstring(L, nm.c_str());
+                g_lua.lua_rawseti(L, -2, ++i);
+            } while (FindNextFileW(h, &fd));
+            FindClose(h);
+        }
+        return 1;
+    }
+    return PushFail(L, ("SMX.files: unknown operation '" + op + "'").c_str());
+}
+
+// The natives table passed to smext.lua as its second argument.
+static int PushExtNatives(lua_State* L) {
+    g_lua.lua_createtable(L, 0, 16);
+    struct { const char* name; lua_CFunction fn; } fns[] = {
+        {"log", X_log}, {"clock", X_clock}, {"date", X_date}, {"info", X_info}, {"compile", X_compile},
+        {"call", X_call}, {"keyDown", X_keyDown}, {"fsOk", X_fsOk}, {"fs", X_fs},
+    };
+    for (auto& f : fns) { g_lua.lua_pushcclosure(L, f.fn, 0); g_lua.lua_setfield(L, -2, f.name); }
+    // Plain Lua functions the game env leaves out, taken from the raw globals
+    for (const char* raw : {"setmetatable", "getmetatable", "rawget", "rawset", "rawequal"}) {
+        g_lua.lua_getfield(L, LUA_GLOBALSINDEX, raw);
+        g_lua.lua_setfield(L, -2, raw);
+    }
+    return 1;
+}
+
+static void ApplyExtFns(lua_State* L, const std::string* only) {
+    std::vector<ExtFnEntry> fns;
+    { std::lock_guard<std::mutex> lk(g_netMutex); fns = g_extFns; }
+    StateExt* ext = GetExt(L);
+    if (!ext || ext->smextRef < 0) return;
+    for (auto& f : fns) {
+        if (only && f.name != *only) continue;
+        if (f.raw) {
+            CallSDK(L, ext->smextRef, "SMX", "__addRaw", [&](lua_State* l) {
+                g_lua.lua_pushstring(l, f.name.c_str());
+                g_lua.lua_pushcclosure(l, f.raw, 0);
+                return 2;
+            });
+        } else {
+            CallSDK(L, ext->smextRef, "SMX", "__addJson", [&](lua_State* l) {
+                g_lua.lua_pushstring(l, f.name.c_str());
+                return 1;
+            });
+        }
+    }
+}
+
+static bool ValidFnName(const char* name) {
+    if (!name) return false;
+    std::string n = name;
+    size_t dot = n.find('.');
+    return dot != std::string::npos && dot > 0 && dot + 1 < n.size() && n.size() <= 128 && ValidModId(n.substr(0, dot));
+}
+
+static int AddExtFn(const char* name, SMExtFn fn, lua_CFunction raw, void* user) {
+    if (!ValidFnName(name) || (!fn && !raw)) return 0;
+    std::string n = name;
+    {
+        std::lock_guard<std::mutex> lk(g_netMutex);
+        for (auto& f : g_extFns) if (f.name == n) { f.fn = fn; f.raw = raw; f.user = user; goto queued; }
+        g_extFns.push_back({n, fn, raw, user});
+    }
+queued:
+    QueueNetJob([n](lua_State* L) { ApplyExtFns(L, &n); });
+    return 1;
+}
+static int Api_ExtRegister(const char* name, SMExtFn fn, void* user) { return AddExtFn(name, fn, nullptr, user); }
+static int Api_ExtRegisterRaw(const char* name, lua_CFunction fn) { return AddExtFn(name, nullptr, fn, nullptr); }
+
+static const char* Api_ExtToken(const char* modId) {
+    if (!modId || !ValidModId(modId)) return nullptr;
+    std::lock_guard<std::mutex> lk(g_netMutex);
+    auto it = g_extTokens.find(modId);
+    if (it != g_extTokens.end()) return it->second.c_str();
+    unsigned char rnd[16];
+    if (BCryptGenRandom(nullptr, rnd, sizeof rnd, BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0) return nullptr;
+    char hex[33];
+    for (int i = 0; i < 16; ++i) snprintf(hex + i * 2, 3, "%02x", rnd[i]);
+    return (g_extTokens[modId] = hex).c_str();
+}
+
+static lua_State* Api_WorldState() {
+    std::lock_guard<std::mutex> lk(g_netMutex);
+    return g_netState;
 }
 
 // Native jobs run under lua_cpcall so a lua_error inside them cannot unwind
@@ -1221,6 +1564,10 @@ static void LoadMods() {
     g_api.EventOff = Api_EventOff;
     g_api.EventEmit = Api_EventEmit;
     g_api.EventEmitTo = Api_EventEmitTo;
+    g_api.ExtRegister = Api_ExtRegister;
+    g_api.ExtRegisterRaw = Api_ExtRegisterRaw;
+    g_api.ExtToken = Api_ExtToken;
+    g_api.WorldState = Api_WorldState;
 
     if (!g_cfg.loadMods) { Log("LoadMods=0, skipping native mods"); return; }
 
@@ -1236,6 +1583,7 @@ static void LoadMods() {
         auto init = (SMMod_InitFn)GetProcAddress(m, "SMMod_Init");
         if (!init) { Log("mod %s: no SMMod_Init export, unloading", name.c_str()); FreeLibrary(m); continue; }
         Log("mod %s: initializing", name.c_str());
+        g_modNames.push_back(name);
         init(&g_api);
         g_mods.push_back(m);
     } while (FindNextFileW(h, &fd));

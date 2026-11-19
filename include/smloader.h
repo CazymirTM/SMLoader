@@ -168,6 +168,9 @@ typedef void (*SMNetHandler)(const char* modId, const char* msg, const char* dat
 typedef void (*SMEventFn)(const char* name, const char* json, size_t len, int fromPlayerId, int remote,
                           void* user);
 
+/* --- SMExtensions (API version 3) ---------------------------------------- */
+typedef int (*SMExtFn)(const char* argsJson, size_t len, char* out, size_t outSize, void* user);
+
 typedef struct SMNetStatus {
     int  inWorld;          /* SMNetworking is running in the current world        */
     int  connected;        /* the host answered this machine: messages can flow   */
@@ -295,6 +298,32 @@ typedef struct SMLoaderAPI {
     void (*EventOff)(int listenerId);
     int  (*EventEmit)(const char* name, const char* json);
     int  (*EventEmitTo)(int target, const char* name, const char* json);
+
+    /* SMExtensions (see docs/EXTENSIONS.md): native functions callable from
+       Lua as SMX.fn.<mod>.<name>(...) and SMX.call("<mod>.<name>", ...).
+       name is "<mod>.<function>". Registered functions apply to every world,
+       now and later. They run on the game thread, inside whatever Lua code
+       called them.
+
+       ExtRegister (JSON): the arguments arrive as a JSON array. Write the
+       result as JSON into out (or leave it empty for nil) and return its
+       length; if it doesn't fit, return the full length and you'll be called
+       again with a big enough buffer. Return a negative value for an error,
+       with the message in out.
+
+       ExtRegisterRaw: a plain lua_CFunction using api->lua (full control).
+
+       ExtToken: the secret token that opens SMX.files("<modId>", token), the
+       mod's private folder SMLoader\data\<modId>\. Only give it to your own
+       Lua code (put it in a local, not a global): Workshop scripts share the
+       game's Lua environment. Stable for the whole game session.
+
+       WorldState: the lua_State the current world's scripts (and the SDK)
+       run in, or NULL at the main menu. Use it with QueueLua / QueueLuaIn. */
+    int  (*ExtRegister)(const char* name, SMExtFn fn, void* user);
+    int  (*ExtRegisterRaw)(const char* name, lua_CFunction fn);
+    const char* (*ExtToken)(const char* modId);
+    lua_State* (*WorldState)(void);
 } SMLoaderAPI;
 
 typedef void (*SMMod_InitFn)(const SMLoaderAPI* api);

@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.2.0 — SMPlayerData and SMEvents
+## 1.2.0 — SMPlayerData, SMEvents and SMExtensions
 
 - **SMPlayerData:** persistent player statistics and progression, built into
   the loader and saved in the world. Every world gets a global `SMData` table
@@ -25,10 +25,22 @@
     `robot.killed`, `crop.harvested`, `food.eaten`, `data.levelUp`,
     `data.unlock`.
   - Guide: `docs/EVENTS.md`.
+- **SMExtensions:** more functionality for Lua (`SMX`).
+  - Native functions callable from Lua (`ExtRegister` / `ExtRegisterRaw` →
+    `SMX.fn.<mod>.<name>`).
+  - Timers (client or host).
+  - Hotkeys (only while the game is focused).
+  - A private, token-protected folder per mod (`SMLoader\data\<mod>\`) with
+    JSON and config helpers.
+  - `setmetatable` / `rawget` / `compile`.
+  - Table, string and math utilities, `pretty`, `crc32`, `base64`, a
+    high-resolution clock, `date`, `profile` and `log`.
+  - `WorldState()` gives native mods the world's Lua state.
+  - Guide: `docs/EXTENSIONS.md`.
 - **SMNetworking:** `SMNet.onServerTick` / `SMNet.onClientTick` (per-tick
   listeners without wrapping) and `SMNet.addCallbackHook` for Lua.
-- New examples: **DataDemo** (native SMPlayerData) and **EventDemo** (native
-  SMEvents).
+- New examples: **DataDemo** (native SMPlayerData), **EventDemo** (native
+  SMEvents) and **ExtDemo** (SMExtensions).
 - API version 3. Mods built for 1.0.0 and 1.1.0 keep working unchanged.
 
 ## 1.1.0 — SMNetworking

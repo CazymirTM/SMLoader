@@ -3,8 +3,9 @@
 - API version 2 (SMLoader 1.1.0) added `AddCallbackHook` and SMNetworking
   (`NetRegister`, `NetOn`, `NetSend`, `NetGetStatus`).
 - API version 3 (SMLoader 1.2.0) added SMPlayerData (`DataGet`, `DataSet`,
-  `DataAdd`, `DataAddXP`, `DataUnlock`) and SMEvents (`EventOn`, `EventOff`,
-  `EventEmit`, `EventEmitTo`).
+  `DataAdd`, `DataAddXP`, `DataUnlock`), SMEvents (`EventOn`, `EventOff`,
+  `EventEmit`, `EventEmitTo`) and SMExtensions (`ExtRegister`, `ExtRegisterRaw`,
+  `ExtToken`, `WorldState`).
 - Mods only need the loader version that matches the features they use.
 
 Everything is declared in [`include/smloader.h`](../include/smloader.h). It is
@@ -168,11 +169,24 @@ One event bus shared with Lua mods (`SMEvents`) and the SDK's built-in events.
 A listener runs on the thread that emitted the event. The full guide is in
 [EVENTS.md](EVENTS.md).
 
+## SMExtensions (API v3)
+
+```c
+int ExtRegister(const char* name, SMExtFn fn, void* user);   // Lua: SMX.fn.<mod>.<name>(...)
+int ExtRegisterRaw(const char* name, lua_CFunction fn);
+const char* ExtToken(const char* modId);                    // opens SMX.files(modId, token)
+lua_State* WorldState(void);                                // the world's Lua state, or NULL
+```
+- Native functions callable from Lua, a private file folder per mod, and the
+  world's state for `QueueLua`.
+- Lua also gets timers, hotkeys, metatables and utilities through `SMX`.
+- The full guide is in [EXTENSIONS.md](EXTENSIONS.md).
+
 ## Lua environments
 
 | Env | Has | Doesn't have |
 |---|---|---|
-| `"game"` (shared script env) | game classes (`SurvivalGame`, `BasePlayer`, …), `sm.*`, `class`, whitelisted `string`/`table`/`math`/`os`/`bit` | `getfenv`, `rawget`, `setmetatable`, `debug`, `ffi`, `loadstring` |
+| `"game"` (shared script env) | game classes (`SurvivalGame`, `BasePlayer`, …), `sm.*`, `class`, whitelisted `string`/`table`/`math`/`os`/`bit` | `getfenv`, `rawget`, `setmetatable`, `debug`, `ffi`, `loadstring` (SMLoader 1.2+ offers `SMX.rawget`, `SMX.setmetatable` and `SMX.compile` instead) |
 | raw globals (`NULL`) | everything LuaJIT opened: `debug`, `ffi`, `os`, `package`, `unsafe_env` | the game classes (they're in the game env) |
 
 From the raw env, you can reach the game env as the registry table whose
