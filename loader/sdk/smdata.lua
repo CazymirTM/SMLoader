@@ -20,6 +20,8 @@
 --             and published keys of everyone are shared with all players.
 --  Hooks      Observation only (SMNet callback hooks + tick listeners); no game
 --             function is wrapped or replaced.
+--  Events     Emits SMEvents on the host: player.death, player.damaged,
+--             robot.killed, crop.harvested, food.eaten, data.levelUp, data.unlock.
 
 local E = ...
 if SMData and SMData.__env == E then return "already installed" end
@@ -62,6 +64,7 @@ local function pidOf( p )
 end
 local function nameOf( pl ) local ok, n = pcall( function() return pl.name end ) return ok and n or nil end
 local function isHost() return NET.isHost() end
+local function emit( name, data ) local ev = SMEvents if ev then ev.emit( name, data ) end end
 local function hostOnly( fname )
 	if isHost() then return true end
 	log( fname .. ": only the host can change player data" )
@@ -291,7 +294,10 @@ function D.addXP( player, mod, amount )
 	m.lv = ( D.levelOf( mod, m.xp ) )
 	changed( r, mod, "@xp", m.xp )
 	changed( r, mod, "@level", m.lv )           -- always, so readers see level 1 too
-	if m.lv > old then fire( D.levelListeners[mod], player, m.lv, old ) end
+	if m.lv > old then
+		fire( D.levelListeners[mod], player, m.lv, old )
+		emit( "data.levelUp", { id = r.id, mod = mod, level = m.lv, old = old } )
+	end
 	return m.lv, m.lv - old
 end
 
@@ -308,6 +314,7 @@ function D.unlock( player, mod, id )
 	table.sort( list )
 	changed( r, mod, "@unlocks", list )
 	fire( D.unlockListeners[mod], player, id )
+	emit( "data.unlock", { id = r.id, mod = mod, unlock = id } )
 	return true
 end
 function D.isUnlocked( player, mod, id )
@@ -410,13 +417,29 @@ function D.__playerTick( ps )
 	local r = rec( ps.player )
 	if not r then return end
 	local hp, conscious = tonumber( s.stats.hp ), s.isConscious
-	if hp and r.lastHp and r.lastConscious and hp < r.lastHp then D.addStat( ps.player, "damageTaken", r.lastHp - hp ) end
-	if r.lastConscious == true and conscious == false then D.addStat( ps.player, "deaths", 1 ) end
+	if hp and r.lastHp and r.lastConscious and hp < r.lastHp then
+		D.addStat( ps.player, "damageTaken", r.lastHp - hp )
+		emit( "player.damaged", { id = r.id, amount = r.lastHp - hp, hp = hp } )
+	end
+	if r.lastConscious == true and conscious == false then
+		D.addStat( ps.player, "deaths", 1 )
+		emit( "player.death", { id = r.id } )
+	end
 	r.lastHp, r.lastConscious = hp, conscious
 end
 
-function D.__eat( ps ) if ps and ps.player then D.addStat( ps.player, "foodEaten", 1 ) end end
-function D.__harvest( _, _, player ) if ty( player ) == "Player" then D.addStat( player, "cropsHarvested", 1 ) end end
+function D.__eat( ps )
+	if ps and ps.player then
+		D.addStat( ps.player, "foodEaten", 1 )
+		emit( "food.eaten", { id = pidOf( ps.player ) } )
+	end
+end
+function D.__harvest( _, _, player )
+	if ty( player ) == "Player" then
+		D.addStat( player, "cropsHarvested", 1 )
+		emit( "crop.harvested", { id = pidOf( player ) } )
+	end
+end
 
 -- Robot hits: remember the attacking player; the kill is confirmed on the next
 -- host ticks when the robot's health reaches 0.
@@ -438,6 +461,7 @@ local function confirmKills()
 				unit.__smdKilled = true
 				D.addStat( h.p, "kills", 1 )
 				D.addStat( h.p, "kills." .. h.cls, 1 )
+				emit( "robot.killed", { id = pidOf( h.p ), robot = h.cls } )
 			end
 			H.hits[unit] = nil
 		elseif t - h.t > 3 then
@@ -561,7 +585,10 @@ local function svTick( game )
 				if generic then
 					local okd, downed = pcall( function() return char:isDowned() end )
 					if okd then
-						if downed and not r.wasDowned then D.addStat( pl, "deaths", 1 ) end
+						if downed and not r.wasDowned then
+							D.addStat( pl, "deaths", 1 )
+							emit( "player.death", { id = r.id } )
+						end
 						r.wasDowned = downed
 					end
 				end

@@ -3,7 +3,8 @@
 - API version 2 (SMLoader 1.1.0) added `AddCallbackHook` and SMNetworking
   (`NetRegister`, `NetOn`, `NetSend`, `NetGetStatus`).
 - API version 3 (SMLoader 1.2.0) added SMPlayerData (`DataGet`, `DataSet`,
-  `DataAdd`, `DataAddXP`, `DataUnlock`).
+  `DataAdd`, `DataAddXP`, `DataUnlock`) and SMEvents (`EventOn`, `EventOff`,
+  `EventEmit`, `EventEmitTo`).
 - Mods only need the loader version that matches the features they use.
 
 Everything is declared in [`include/smloader.h`](../include/smloader.h). It is
@@ -154,6 +155,18 @@ Persistent per-player data saved in the world:
 
 Lua mods use the `SMData` table. The full guide is in
 [PLAYERDATA.md](PLAYERDATA.md).
+
+## SMEvents (API v3)
+
+```c
+int  EventOn(const char* name, SMEventFn fn, void* user);   // "player.*" patterns work
+void EventOff(int listenerId);
+int  EventEmit(const char* name, const char* json);
+int  EventEmitTo(int target, const char* name, const char* json);
+```
+One event bus shared with Lua mods (`SMEvents`) and the SDK's built-in events.
+A listener runs on the thread that emitted the event. The full guide is in
+[EVENTS.md](EVENTS.md).
 
 ## Lua environments
 

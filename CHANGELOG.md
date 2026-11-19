@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.2.0 — SMPlayerData
+## 1.2.0 — SMPlayerData and SMEvents
 
 - **SMPlayerData:** persistent player statistics and progression, built into
   the loader and saved in the world. Every world gets a global `SMData` table
@@ -15,9 +15,20 @@
   - Each player's own record is synced to them; everyone's stats and published
     keys are synced to all players.
   - Guide: `docs/PLAYERDATA.md`.
+- **SMEvents:** one event bus shared by Lua mods (`SMEvents`), native mods
+  (`EventOn` / `EventOff` / `EventEmit` / `EventEmitTo`) and the SDK.
+  - Priorities, `once`, and `*` patterns.
+  - Lua tables reach C++ as JSON and C++ JSON reaches Lua as tables.
+  - Networked events over SMNetworking.
+  - Built-in events: `world.loaded`, `world.closed`, `net.connected`,
+    `player.joined`, `player.left`, `player.death`, `player.damaged`,
+    `robot.killed`, `crop.harvested`, `food.eaten`, `data.levelUp`,
+    `data.unlock`.
+  - Guide: `docs/EVENTS.md`.
 - **SMNetworking:** `SMNet.onServerTick` / `SMNet.onClientTick` (per-tick
   listeners without wrapping) and `SMNet.addCallbackHook` for Lua.
-- New example: **DataDemo** (native SMPlayerData).
+- New examples: **DataDemo** (native SMPlayerData) and **EventDemo** (native
+  SMEvents).
 - API version 3. Mods built for 1.0.0 and 1.1.0 keep working unchanged.
 
 ## 1.1.0 — SMNetworking

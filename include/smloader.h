@@ -158,6 +158,16 @@ typedef void (*SMJobFn)(lua_State* L, void* user);
 typedef void (*SMNetHandler)(const char* modId, const char* msg, const char* data, size_t len,
                              int fromPlayerId, int side, void* user);
 
+/* --- SMEvents (API version 3) --------------------------------------------
+   One event bus for native mods, Lua mods (SMEvents table) and the SDK. See
+   docs/EVENTS.md. A listener name ending in '*' matches every event that
+   starts with the part before it ("player.*", "*").
+   fromPlayerId: who sent a networked event (0 = local, or the host's server
+   side). remote: nonzero if it came over the network. json is valid only
+   during the call and is not necessarily NUL-terminated (use len). */
+typedef void (*SMEventFn)(const char* name, const char* json, size_t len, int fromPlayerId, int remote,
+                          void* user);
+
 typedef struct SMNetStatus {
     int  inWorld;          /* SMNetworking is running in the current world        */
     int  connected;        /* the host answered this machine: messages can flow   */
@@ -272,6 +282,19 @@ typedef struct SMLoaderAPI {
     int  (*DataAdd)(int playerId, const char* mod, const char* key, double delta);
     int  (*DataAddXP)(int playerId, const char* mod, double amount);
     int  (*DataUnlock)(int playerId, const char* mod, const char* unlockId);
+
+    /* SMEvents. EventOn returns a listener id (> 0) for EventOff.
+       Threads: a listener runs on the thread that emitted the event. Events
+       from Lua, the SDK and the network arrive on the game thread; EventEmit
+       calls native listeners right away on the calling thread and queues the
+       Lua listeners for the game thread (if a world is loaded).
+       EventEmitTo sends over SMNetworking (targets as for NetSend: SMNET_TO_*
+       or a player id); returns 0 if no world is loaded. json may be NULL
+       (no data). All functions are thread-safe. */
+    int  (*EventOn)(const char* name, SMEventFn fn, void* user);
+    void (*EventOff)(int listenerId);
+    int  (*EventEmit)(const char* name, const char* json);
+    int  (*EventEmitTo)(int target, const char* name, const char* json);
 } SMLoaderAPI;
 
 typedef void (*SMMod_InitFn)(const SMLoaderAPI* api);

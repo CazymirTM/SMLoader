@@ -171,6 +171,8 @@ struct StateExt {
     ULONGLONG netCheckAt = 0;          // last SMNetworking install check
     int smnetRef = -2;                 // registry ref to the installed SMNet table
     int smdataRef = -2;                // registry ref to the installed SMData table
+    int smeventsRef = -2;              // registry ref to the installed SMEvents table
+    bool smeventsFailed = false;
     bool smdataFailed = false;         // don't retry a broken install every second
 };
 
@@ -530,6 +532,7 @@ static int Api_AddCallbackHook(const char* callback, const char* handler) {
 // game env of every world and bridges it to native mods.
 // ---------------------------------------------------------------------------
 #include "smnet_lua.inc"   // kSMNetLua, kSMNetLuaSize
+#include "smevents_lua.inc"  // kSMEventsLua, kSMEventsLuaSize (SMEvents)
 #include "smdata_lua.inc"  // kSMDataLua, kSMDataLuaSize (SMPlayerData)
 
 struct NetHandlerEntry { std::string mod, msg; int side; SMNetHandler fn; void* user; };
@@ -540,6 +543,30 @@ static std::vector<NetHandlerEntry> g_netHandlers;
 static std::map<std::string, SMNetStatus> g_netStatus;
 static std::map<std::string, std::string> g_dataCache;   // "<playerId>|<mod>|<key>" -> JSON (SMPlayerData)
 static int g_localPlayerId = 0;
+
+// SMEvents: native listeners (own lock: listeners may emit from inside a call)
+struct EventListener { int id; std::string pattern; SMEventFn fn; void* user; };
+static std::mutex g_eventMutex;
+static std::vector<EventListener> g_eventListeners;
+static int g_nextEventId = 1;
+
+static bool EventMatches(const std::string& pattern, const std::string& name) {
+    if (!pattern.empty() && pattern.back() == '*')
+        return name.compare(0, pattern.size() - 1, pattern, 0, pattern.size() - 1) == 0;
+    return pattern == name;
+}
+
+static void DispatchNativeEvent(const std::string& name, const std::string& json, int from, int remote) {
+    std::vector<EventListener> run;
+    {
+        std::lock_guard<std::mutex> lk(g_eventMutex);
+        for (auto& l : g_eventListeners) if (EventMatches(l.pattern, name)) run.push_back(l);
+    }
+    for (auto& l : run) {
+        try { l.fn(name.c_str(), json.data(), json.size(), from, remote, l.user); }
+        catch (...) { Log("SMEvents: a native listener for '%s' threw an exception", l.pattern.c_str()); }
+    }
+}
 
 static const char* kGameClasses[] = {"SurvivalGame", "CreativeGame", "ChallengeGame", "Game"};
 
@@ -592,6 +619,9 @@ static int NetNative(lua_State* L) {
         std::string json = StackString(L, 5);
         std::lock_guard<std::mutex> lk(g_netMutex);
         g_dataCache[k] = json;
+    } else if (kind == "event") {                          // name, json, fromId, remote (SMEvents)
+        DispatchNativeEvent(StackString(L, 2), StackString(L, 3), (int)g_lua.lua_tointeger(L, 4),
+                            (int)g_lua.lua_tointeger(L, 5));
     } else if (kind == "local") {                          // local player id
         std::lock_guard<std::mutex> lk(g_netMutex);
         g_localPlayerId = (int)g_lua.lua_tointeger(L, 2);
@@ -622,6 +652,29 @@ static void CallSMNet(lua_State* L, const char* fn, const std::function<int(lua_
 static void CallSMData(lua_State* L, const char* fn, const std::function<int(lua_State*)>& push) {
     StateExt* ext = GetExt(L);
     if (ext) CallSDK(L, ext->smdataRef, "SMData", fn, push);
+}
+static void CallSMEvents(lua_State* L, const char* fn, const std::function<int(lua_State*)>& push) {
+    StateExt* ext = GetExt(L);
+    if (ext) CallSDK(L, ext->smeventsRef, "SMEvents", fn, push);
+}
+
+// Tell SMEvents (Lua) how many native listeners each pattern has, so it only
+// encodes JSON for events someone native is listening to.
+static void PushNativePatterns(lua_State* L, const std::string* only) {
+    std::map<std::string, int> counts;
+    {
+        std::lock_guard<std::mutex> lk(g_eventMutex);
+        for (auto& l : g_eventListeners) ++counts[l.pattern];
+    }
+    if (only && !counts.count(*only)) counts[*only] = 0;
+    for (auto& c : counts) {
+        if (only && c.first != *only) continue;
+        CallSMEvents(L, "__setNative", [&](lua_State* l) {
+            g_lua.lua_pushstring(l, c.first.c_str());
+            g_lua.lua_pushinteger(l, c.second);
+            return 2;
+        });
+    }
 }
 
 // Is env[global] an SDK table already installed for this env?
@@ -698,6 +751,14 @@ static void EnsureSMNet(lua_State* L, int env) {
                 if (m.second.empty()) g_lua.lua_pushnil(l); else g_lua.lua_pushstring(l, m.second.c_str());
                 return 2;
             });
+    }
+    if (!ext->smeventsFailed && !SDKInstalled(L, env, "SMEvents")) {
+        if (InstallSDK(L, env, "SMEvents", kSMEventsLua, kSMEventsLuaSize, "=SMEvents", &ext->smeventsRef)) {
+            Log("SMEvents installed in state %p", (void*)L);
+            PushNativePatterns(L, nullptr);
+        } else {
+            ext->smeventsFailed = true;
+        }
     }
     if (!ext->smdataFailed && !SDKInstalled(L, env, "SMData")) {
         if (InstallSDK(L, env, "SMData", kSMDataLua, kSMDataLuaSize, "=SMPlayerData", &ext->smdataRef))
@@ -841,6 +902,62 @@ static int Api_DataUnlock(int playerId, const char* mod, const char* unlockId) {
             g_lua.lua_pushinteger(l, playerId);
             g_lua.lua_pushstring(l, m.c_str());
             g_lua.lua_pushstring(l, u.c_str());
+            return 3;
+        });
+    }) ? 1 : 0;
+}
+
+// ---------------------------------------------------------------------------
+// SMEvents (native API v3)
+// ---------------------------------------------------------------------------
+static void QueuePatternUpdate(const std::string& pattern) {
+    QueueNetJob([pattern](lua_State* L) { PushNativePatterns(L, &pattern); });
+}
+
+static int Api_EventOn(const char* name, SMEventFn fn, void* user) {
+    if (!name || !*name || !fn) return 0;
+    int id;
+    {
+        std::lock_guard<std::mutex> lk(g_eventMutex);
+        id = g_nextEventId++;
+        g_eventListeners.push_back({id, name, fn, user});
+    }
+    QueuePatternUpdate(name);
+    return id;
+}
+
+static void Api_EventOff(int listenerId) {
+    std::string pattern;
+    {
+        std::lock_guard<std::mutex> lk(g_eventMutex);
+        for (auto it = g_eventListeners.begin(); it != g_eventListeners.end(); ++it)
+            if (it->id == listenerId) { pattern = it->pattern; g_eventListeners.erase(it); break; }
+    }
+    if (!pattern.empty()) QueuePatternUpdate(pattern);
+}
+
+static int Api_EventEmit(const char* name, const char* json) {
+    if (!name || !*name) return 0;
+    std::string n = name, j = json ? json : "null";
+    DispatchNativeEvent(n, j, 0, 0);                   // native listeners: now, on this thread
+    QueueNetJob([n, j](lua_State* L) {                 // Lua listeners: on the game thread
+        CallSMEvents(L, "__fromNative", [&](lua_State* l) {
+            g_lua.lua_pushstring(l, n.c_str());
+            g_lua.lua_pushstring(l, j.c_str());
+            return 2;
+        });
+    });
+    return 1;
+}
+
+static int Api_EventEmitTo(int target, const char* name, const char* json) {
+    if (!name || !*name) return 0;
+    std::string n = name, j = json ? json : "null";
+    return QueueNetJob([target, n, j](lua_State* L) {
+        CallSMEvents(L, "__emitTo", [&](lua_State* l) {
+            g_lua.lua_pushinteger(l, target);
+            g_lua.lua_pushstring(l, n.c_str());
+            g_lua.lua_pushstring(l, j.c_str());
             return 3;
         });
     }) ? 1 : 0;
@@ -1100,6 +1217,10 @@ static void LoadMods() {
     g_api.DataAdd = Api_DataAdd;
     g_api.DataAddXP = Api_DataAddXP;
     g_api.DataUnlock = Api_DataUnlock;
+    g_api.EventOn = Api_EventOn;
+    g_api.EventOff = Api_EventOff;
+    g_api.EventEmit = Api_EventEmit;
+    g_api.EventEmitTo = Api_EventEmitTo;
 
     if (!g_cfg.loadMods) { Log("LoadMods=0, skipping native mods"); return; }
 
@@ -1185,6 +1306,7 @@ static void Hook_lua_close(lua_State* L) {
         Log("lua_close %p (%zu state(s) alive)", (void*)L, g_states.size());
     }
     if (t_extL == L) { t_extL = nullptr; t_ext.reset(); }
+    bool worldClosed = false;
     {
         std::lock_guard<std::mutex> lk(g_netMutex);
         if (g_netState == L) {
@@ -1192,9 +1314,11 @@ static void Hook_lua_close(lua_State* L) {
             g_netStatus.clear();
             g_dataCache.clear();
             g_localPlayerId = 0;
+            worldClosed = true;
             Log("SMNetworking: world closed");
         }
     }
+    if (worldClosed) DispatchNativeEvent("world.closed", "null", 0, 0);   // native only: Lua is going away
     for (auto& j : orphaned) if (j.done) j.done(0, "the Lua state was closed", j.user);
     o_lua_close(L);
 }

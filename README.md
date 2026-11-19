@@ -8,7 +8,8 @@ they load, and the screen, for menus and overlays.
 - **For modders:** a small C API (`include/smloader.h`) with examples, a live
   Lua console, a crash reporter, and **SMNetworking** for multiplayer mods that
   stay in sync ([guide](docs/NETWORKING.md)), and **SMPlayerData** for persistent
-  player stats and progression ([guide](docs/PLAYERDATA.md)).
+  player stats and progression ([guide](docs/PLAYERDATA.md)), and **SMEvents**, one
+  event bus shared by Lua and C++ ([guide](docs/EVENTS.md)).
 
 > Built for **Scrap Mechanic 1.0.7a** (Steam, Windows x64). Not affiliated
 > with or endorsed by Axolot Games.
@@ -104,6 +105,7 @@ rename it, and build.
 | `PatchImport(dll, func, hook, &orig)` | Redirect a function the game imports. Hooks from several mods chain |
 | `AddPresentCallback(fn)` | Draw on screen every frame (e.g. a Dear ImGui menu) |
 | `AddCallbackHook("SurvivalGame.server_onFixedUpdate", "MyMod.tick")` | Run your Lua function before a game callback, without wrapping it (several mods can share a callback) |
+| `EventOn` / `EventOff` / `EventEmit` / `EventEmitTo` | **SMEvents**: subscribe to and emit events shared with Lua mods and the SDK (`robot.killed`, `player.joined`, ...). Lua mods use the `SMEvents` table ([guide](docs/EVENTS.md)) |
 | `DataGet` / `DataSet` / `DataAdd` / `DataAddXP` / `DataUnlock` | **SMPlayerData**: per-player stats, mod data, XP and unlocks saved in the world. Lua mods use the `SMData` table ([guide](docs/PLAYERDATA.md)) |
 | `NetRegister` / `NetOn` / `NetSend` / `NetGetStatus` | **SMNetworking**: multiplayer messages, a roster and the "does everyone have my mod?" check. Lua mods use the `SMNet` table instead ([guide](docs/NETWORKING.md)) |
 
