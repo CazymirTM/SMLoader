@@ -1,4 +1,8 @@
-# SMLoader API reference (API version 1)
+# SMLoader API reference (API version 2)
+
+API version 2 (SMLoader 1.1.0) added `AddCallbackHook` and SMNetworking
+(`NetRegister`, `NetOn`, `NetSend`, `NetGetStatus`). Mods that only use
+version 1 features keep working on every loader version.
 
 Everything is declared in [`include/smloader.h`](../include/smloader.h). It is
 plain C, so you can write mods in C or C++.
@@ -14,9 +18,10 @@ __declspec(dllexport) void SMMod_Shutdown(void);                 // optional
   the game has started (at the main menu, before any Lua state exists).
 - Creating threads, loading libraries and installing hooks is fine here.
   Don't touch Lua yet: wait for `OnStateCreated` or `OnGameTick`.
-- Check `api->version >= SMLOADER_API_VERSION`. New functions are only ever
-  added at the end of `SMLoaderAPI`, so also check any function pointer you
-  need is non-null.
+- Check that `api->version` is at least the version whose features you use
+  (`>= 2` for callback hooks and networking). New functions are only ever added
+  at the end of `SMLoaderAPI`, and older loaders don't have them at all, so
+  never read a field beyond what `api->version` promises.
 
 ## `SMLoaderAPI` fields
 
@@ -105,6 +110,30 @@ int AddPresentCallback(void (*fn)(void* swapChain, void* user), void* user);
 - Create your render-target view each frame and release it afterwards, so you
   never hold the back buffer when the game resizes.
 - The loader installs the hook a few seconds after the game window appears.
+
+```c
+int AddCallbackHook(const char* callback, const char* handler);   // API v2
+```
+Every time the game is about to call `callback` (e.g.
+`"SurvivalGame.server_onFixedUpdate"`), first call the Lua function `handler`
+(e.g. `"MyMod.onTick"`, looked up in the game env) with the same arguments,
+inside the callback's sandbox.
+- It is persistent and applies to every state, now and later. Both expressions
+  are re-resolved every 2 s.
+- Nothing is wrapped or replaced, so many mods can hook the same callback
+  safely. Prefer it over overwriting game functions.
+
+## SMNetworking (API v2)
+
+```c
+void NetRegister(const char* modId, const char* version);
+void NetOn(const char* modId, const char* msg, int side, SMNetHandler fn, void* user);
+int  NetSend(const char* modId, const char* msg, int target, const char* data, size_t len);
+int  NetGetStatus(const char* modId, SMNetStatus* out);
+```
+Multiplayer messaging, a roster and the "does everyone have my mod" check.
+Lua mods get the same features through the `SMNet` table. The full guide is in
+[NETWORKING.md](NETWORKING.md).
 
 ## Lua environments
 

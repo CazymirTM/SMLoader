@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.1.0 — SMNetworking
+
+- **SMNetworking:** tools for multiplayer mods that stay in sync, built into
+  the loader. Every world gets a global `SMNet` table (Lua) and native mods get
+  `NetRegister` / `NetOn` / `NetSend` / `NetGetStatus` (API version 2).
+  - Messages: client → host, host → player, host → everyone, and player →
+    everyone (relayed by the host).
+  - Requests with replies and timeouts.
+  - Host-owned shared state, mirrored to every player, including late
+    joiners.
+  - A roster of players and their mods, plus `SMNet.isReady(mod)` /
+    `SMNet.missing(mod)`.
+  - A handshake, so players without SMLoader are never sent mod traffic.
+  - `SMNet.json` encoder and decoder.
+  - Guide: `docs/NETWORKING.md`.
+- **Callback hooks** (`AddCallbackHook`): run a Lua function before any game
+  callback without wrapping it, so several mods can hook the same callback
+  safely.
+- New example: **NetDemo** (native networking).
+- Release builds no longer embed local build paths.
+- API version 2. Mods built for 1.0.0 keep working unchanged.
+
 ## 1.0.0 — first release
 
 - `winmm.dll` proxy loader for Scrap Mechanic 1.0.7a (Steam, x64).

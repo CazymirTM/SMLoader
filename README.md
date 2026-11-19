@@ -6,7 +6,8 @@ they load, and the screen, for menus and overlays.
 
 - **For players:** drop in one file and your mods load automatically.
 - **For modders:** a small C API (`include/smloader.h`) with examples, a live
-  Lua console, and a crash reporter.
+  Lua console, a crash reporter, and **SMNetworking** for multiplayer mods that
+  stay in sync ([guide](docs/NETWORKING.md)).
 
 > Built for **Scrap Mechanic 1.0.7a** (Steam, Windows x64). Not affiliated
 > with or endorsed by Axolot Games.
@@ -15,7 +16,7 @@ they load, and the screen, for menus and overlays.
 
 ## Install (players)
 
-1. Download `SMLoader-v1.0.0.zip` from **Releases**.
+1. Download `SMLoader-v1.1.0.zip` from **Releases**.
 2. Open your game folder: Steam → right-click Scrap Mechanic → *Manage* →
    *Browse local files*.
 3. Copy `Release\winmm.dll` into the game's `Release` folder (next to
@@ -23,7 +24,7 @@ they load, and the screen, for menus and overlays.
 4. Copy the `SMLoader` folder into the game folder (next to `Release`).
 5. Put mod `.dll` files in `SMLoader\mods\` and start the game normally.
 
-To check it worked, `SMLoader\loader.log` should start with `SMLoader 1.0.0 starting`.
+To check it worked, `SMLoader\loader.log` should start with `SMLoader 1.1.0 starting`.
 **Uninstall:** delete `Release\winmm.dll`. Steam's "verify files" won't remove
 it for you.
 
@@ -101,6 +102,8 @@ rename it, and build.
 | `OnScriptLoad` | See or rewrite every script the game compiles |
 | `PatchImport(dll, func, hook, &orig)` | Redirect a function the game imports. Hooks from several mods chain |
 | `AddPresentCallback(fn)` | Draw on screen every frame (e.g. a Dear ImGui menu) |
+| `AddCallbackHook("SurvivalGame.server_onFixedUpdate", "MyMod.tick")` | Run your Lua function before a game callback, without wrapping it (several mods can share a callback) |
+| `NetRegister` / `NetOn` / `NetSend` / `NetGetStatus` | **SMNetworking**: multiplayer messages, a roster and the "does everyone have my mod?" check. Lua mods use the `SMNet` table instead ([guide](docs/NETWORKING.md)) |
 
 Full reference: [docs/API.md](docs/API.md).
 

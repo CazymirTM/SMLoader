@@ -21,6 +21,8 @@
 #include <cstring>
 #include <deque>
 #include <functional>
+#include <map>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -151,12 +153,32 @@ struct CallbackJob {
 
 struct TargetRef { int ref = -2 /* LUA_NOREF */; ULONGLONG resolvedAt = 0; };
 
+// A persistent callback hook: before the game calls `target`, call `handler`.
+struct CallbackHook {
+    std::string target, handler;
+    int tref = -2, href = -2;          // registry refs (keep the functions alive)
+    const void* fn = nullptr;          // resolved target function, for a fast compare
+    ULONGLONG errAt = 0;               // last logged error (rate limit)
+};
+
+// Per-state data that only the thread currently running the state touches
+// (the game serializes access to a lua_State), so it needs no lock once found.
+struct StateExt {
+    std::vector<CallbackHook> hooks;
+    size_t globalSeen = 0;             // how many global hooks are merged in
+    ULONGLONG resolvedAt = 0;
+    bool unresolved = false;
+    ULONGLONG netCheckAt = 0;          // last SMNetworking install check
+    int smnetRef = -2;                 // registry ref to the installed SMNet table
+};
+
 struct StateInfo {
     lua_State* L;
     ULONGLONG lastTick = 0;
     std::deque<Job> jobs;
     std::vector<CallbackJob> callbackJobs;
     std::vector<std::pair<std::string, TargetRef>> targets;   // resolved callback functions
+    std::shared_ptr<StateExt> ext = std::make_shared<StateExt>();
 };
 
 static std::mutex g_stateMutex;               // guards g_states and their job queues
@@ -168,9 +190,29 @@ static std::mutex g_cbMutex;
 static thread_local int t_luaDepth = 0;       // nesting of game -> Lua calls on this thread
 static const ULONGLONG kCallbackJobTimeoutMs = 10000;
 
+// Callback hooks added through the API apply to every state.
+static std::vector<std::pair<std::string, std::string>> g_globalHooks;   // guarded by g_stateMutex
+static std::atomic<size_t> g_globalHookCount{0};
+static std::atomic<bool> g_haveHooks{false};
+static std::atomic<uint64_t> g_stateGen{1};   // bumped whenever a state opens or closes
+
 static StateInfo* FindState(lua_State* L) {
     for (auto& s : g_states) if (s.L == L) return &s;
     return nullptr;
+}
+
+// StateExt for L, cached per thread so the pcall hook rarely takes the lock.
+static thread_local lua_State* t_extL = nullptr;
+static thread_local std::shared_ptr<StateExt> t_ext;
+static thread_local uint64_t t_extGen = 0;
+static StateExt* GetExt(lua_State* L) {
+    uint64_t gen = g_stateGen.load(std::memory_order_acquire);
+    if (t_extL == L && t_extGen == gen) return t_ext.get();   // (also caches "not a game state")
+    std::lock_guard<std::mutex> lk(g_stateMutex);
+    StateInfo* s = FindState(L);
+    t_extL = L; t_extGen = gen;
+    t_ext = s ? s->ext : nullptr;
+    return t_ext.get();
 }
 
 static std::vector<SMModCallbacks> SnapshotCallbacks() {
@@ -245,6 +287,8 @@ static bool PushGameEnv(lua_State* L) {
     return false;
 }
 
+static void EnsureSMNet(lua_State* L, int env);   // SMNetworking, below
+
 // Compile and run `src` in `env`, passing copies of stack slots
 // [firstArg, firstArg + nargs) as the chunk's `...`.
 static void RunLuaSource(lua_State* L, const std::string& src, const std::string& name,
@@ -258,6 +302,7 @@ static void RunLuaSource(lua_State* L, const std::string& src, const std::string
     if (!loaded) text = ValueToString(L, -1);
     if (loaded && env == "game") {
         if (PushGameEnv(L)) {
+            EnsureSMNet(L, g_lua.lua_gettop(L));   // so mod code can always use SMNet
             g_lua.lua_setfenv(L, -2);
         } else {
             text = "the game script environment does not exist in this state yet (load into a world)";
@@ -397,6 +442,295 @@ static void RunCallbackJobs(lua_State* L, int fidx, int nargs) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Callback hooks (persistent): run a handler before a game callback
+// ---------------------------------------------------------------------------
+
+// Evaluate `expr` in the game env; on success keep a registry ref to the
+// function in *ref and return its address (nullptr otherwise).
+static const void* ResolveFunction(lua_State* L, const std::string& expr, int* ref) {
+    if (*ref >= 0) { g_lua.luaL_unref(L, LUA_REGISTRYINDEX, *ref); *ref = -2; }
+    int top = g_lua.lua_gettop(L);
+    const void* p = nullptr;
+    std::string code = "return " + expr;
+    if (g_lua.luaL_loadbufferx(L, code.data(), code.size(), "=hook", "t") == 0 && PushGameEnv(L)) {
+        g_lua.lua_setfenv(L, -2);
+        if (o_lua_pcall(L, 0, 1, 0) == 0 && g_lua.lua_type(L, -1) == LUA_TFUNCTION) {
+            p = g_lua.lua_topointer(L, -1);
+            *ref = g_lua.luaL_ref(L, LUA_REGISTRYINDEX);
+        }
+    }
+    g_lua.lua_settop(L, top);
+    return p;
+}
+
+static void AddHookTo(StateExt& ext, const std::string& target, const std::string& handler) {
+    for (auto& h : ext.hooks) if (h.target == target && h.handler == handler) return;
+    CallbackHook h;
+    h.target = target;
+    h.handler = handler;
+    ext.hooks.push_back(std::move(h));
+    ext.resolvedAt = 0;                 // resolve on the next call
+    g_haveHooks = true;
+}
+
+// The game is about to call the function at `fidx` with `nargs` arguments.
+static void RunHooks(lua_State* L, StateExt& ext, int fidx, int nargs) {
+    size_t globalCount = g_globalHookCount.load(std::memory_order_acquire);
+    if (ext.globalSeen < globalCount) {
+        std::vector<std::pair<std::string, std::string>> add;
+        {
+            std::lock_guard<std::mutex> lk(g_stateMutex);
+            add.assign(g_globalHooks.begin() + ext.globalSeen, g_globalHooks.end());
+            ext.globalSeen = g_globalHooks.size();
+        }
+        for (auto& g : add) AddHookTo(ext, g.first, g.second);
+    }
+    if (ext.hooks.empty()) return;
+    ULONGLONG now = GetTickCount64();
+    if (now - ext.resolvedAt > (ext.unresolved ? 500u : 2000u)) {
+        ext.resolvedAt = now;
+        ext.unresolved = false;
+        for (auto& h : ext.hooks) {
+            h.fn = ResolveFunction(L, h.target, &h.tref);
+            ResolveFunction(L, h.handler, &h.href);
+            if (!h.fn || h.href < 0) ext.unresolved = true;
+        }
+    }
+    const void* f = g_lua.lua_topointer(L, fidx);
+    if (!f) return;
+    for (auto& h : ext.hooks) {
+        if (h.fn != f || h.href < 0) continue;
+        int top = g_lua.lua_gettop(L);
+        g_lua.lua_checkstack(L, nargs + 4);
+        g_lua.lua_pushcclosure(L, TracebackHandler, 0);
+        g_lua.lua_rawgeti(L, LUA_REGISTRYINDEX, h.href);
+        for (int i = 1; i <= nargs; ++i) g_lua.lua_pushvalue(L, fidx + i);
+        if (o_lua_pcall(L, nargs, 0, top + 1) != 0 && now - h.errAt > 5000) {
+            h.errAt = now;
+            Log("[hook %s -> %s] error: %s", h.target.c_str(), h.handler.c_str(), ValueToString(L, -1).c_str());
+        }
+        g_lua.lua_settop(L, top);
+    }
+}
+
+static int Api_AddCallbackHook(const char* callback, const char* handler) {
+    if (!callback || !*callback || !handler || !*handler) return 0;
+    std::lock_guard<std::mutex> lk(g_stateMutex);
+    g_globalHooks.push_back({callback, handler});
+    g_globalHookCount = g_globalHooks.size();
+    g_haveHooks = true;
+    return 1;
+}
+
+// ---------------------------------------------------------------------------
+// SMNetworking: installs loader/sdk/smnet.lua (embedded by build.ps1) into the
+// game env of every world and bridges it to native mods.
+// ---------------------------------------------------------------------------
+#include "smnet_lua.inc"   // kSMNetLua, kSMNetLuaSize
+
+struct NetHandlerEntry { std::string mod, msg; int side; SMNetHandler fn; void* user; };
+static std::mutex g_netMutex;                          // guards everything below
+static lua_State* g_netState = nullptr;                // the state SMNet is running in
+static std::vector<std::pair<std::string, std::string>> g_netMods;   // native NetRegister / NetOn
+static std::vector<NetHandlerEntry> g_netHandlers;
+static std::map<std::string, SMNetStatus> g_netStatus;
+
+static const char* kGameClasses[] = {"SurvivalGame", "CreativeGame", "ChallengeGame", "Game"};
+
+static std::string StackString(lua_State* L, int idx) {
+    size_t n = 0;
+    const char* s = g_lua.lua_type(L, idx) == LUA_TSTRING ? g_lua.lua_tolstring(L, idx, &n) : nullptr;
+    return s ? std::string(s, n) : std::string();
+}
+
+// SMNet.__native(kind, ...): Lua -> loader.
+static int NetNative(lua_State* L) {
+    std::string kind = StackString(L, 1);
+    if (kind == "hook") {                                  // target, handler
+        std::string target = StackString(L, 2), handler = StackString(L, 3);
+        if (StateExt* ext = GetExt(L)) {
+            AddHookTo(*ext, target, handler);
+            std::lock_guard<std::mutex> lk(g_netMutex);
+            if (g_netState != L) Log("SMNetworking: active in state %p (%s)", (void*)L, target.c_str());
+            g_netState = L;
+        }
+    } else if (kind == "msg") {                            // side, mod, name, data, fromId
+        int side = (int)g_lua.lua_tointeger(L, 2);
+        std::string mod = StackString(L, 3), name = StackString(L, 4), data = StackString(L, 5);
+        int from = (int)g_lua.lua_tointeger(L, 6);
+        std::vector<NetHandlerEntry> run;
+        {
+            std::lock_guard<std::mutex> lk(g_netMutex);
+            for (auto& h : g_netHandlers)
+                if ((h.side & side) && h.mod == mod && (h.msg == name || h.msg == "*")) run.push_back(h);
+        }
+        for (auto& h : run) {
+            try { h.fn(mod.c_str(), name.c_str(), data.data(), data.size(), from, side, h.user); }
+            catch (...) { Log("SMNetworking: a native handler for %s/%s threw an exception", mod.c_str(), name.c_str()); }
+        }
+    } else if (kind == "status") {  // mod, connected, isHost, ready, players, missingCount, missing, localId
+        SMNetStatus st{};
+        st.inWorld = 1;
+        st.connected = g_lua.lua_toboolean(L, 3);
+        st.isHost = g_lua.lua_toboolean(L, 4);
+        st.ready = g_lua.lua_toboolean(L, 5);
+        st.playerCount = (int)g_lua.lua_tointeger(L, 6);
+        st.missingCount = (int)g_lua.lua_tointeger(L, 7);
+        std::string names = StackString(L, 8);
+        snprintf(st.missing, sizeof st.missing, "%s", names.c_str());
+        st.localPlayerId = (int)g_lua.lua_tointeger(L, 9);
+        std::lock_guard<std::mutex> lk(g_netMutex);
+        g_netStatus[StackString(L, 2)] = st;
+    }
+    return 0;
+}
+
+// Call SMNet[fn](args pushed by `push`) in the state's installed SMNet table.
+static void CallSMNet(lua_State* L, const char* fn, const std::function<int(lua_State*)>& push) {
+    StateExt* ext = GetExt(L);
+    if (!ext || ext->smnetRef < 0) return;
+    int top = g_lua.lua_gettop(L);
+    g_lua.lua_pushcclosure(L, TracebackHandler, 0);
+    g_lua.lua_rawgeti(L, LUA_REGISTRYINDEX, ext->smnetRef);
+    g_lua.lua_getfield(L, -1, fn);
+    if (g_lua.lua_type(L, -1) == LUA_TFUNCTION) {
+        int n = push(L);
+        if (o_lua_pcall(L, n, 0, top + 1) != 0)
+            Log("SMNetworking: SMNet.%s failed: %s", fn, ValueToString(L, -1).c_str());
+    }
+    g_lua.lua_settop(L, top);
+}
+
+// `env` is the stack index of the game env. Installs SMNet once per env (only
+// in worlds: the env must hold a game-mode class), then lets it look for the
+// game class to hook (cheap; SMNet throttles itself).
+static void EnsureSMNet(lua_State* L, int env) {
+    StateExt* ext = GetExt(L);
+    if (!ext) return;
+    int top = g_lua.lua_gettop(L);
+    bool installed = false;
+    g_lua.lua_pushstring(L, "SMNet");
+    g_lua.lua_rawget(L, env);
+    if (g_lua.lua_type(L, -1) == LUA_TTABLE) {
+        g_lua.lua_getfield(L, -1, "__env");
+        installed = g_lua.lua_rawequal(L, -1, env) != 0;
+    }
+    g_lua.lua_settop(L, top);
+    if (!installed) {
+        bool world = false;
+        for (const char* c : kGameClasses) {
+            g_lua.lua_pushstring(L, c);
+            g_lua.lua_rawget(L, env);
+            world = world || g_lua.lua_type(L, -1) == LUA_TTABLE;
+            g_lua.lua_settop(L, top);
+        }
+        if (!world) return;
+        g_lua.lua_pushcclosure(L, TracebackHandler, 0);
+        if (g_lua.luaL_loadbufferx(L, (const char*)kSMNetLua, kSMNetLuaSize, "=SMNetworking", "t") != 0) {
+            Log("SMNetworking: compile error: %s", ValueToString(L, -1).c_str());
+            g_lua.lua_settop(L, top);
+            return;
+        }
+        g_lua.lua_pushvalue(L, env);
+        g_lua.lua_setfenv(L, -2);
+        g_lua.lua_pushvalue(L, env);                       // the chunk's `...`
+        if (o_lua_pcall(L, 1, 0, top + 1) != 0) {
+            Log("SMNetworking: install error: %s", ValueToString(L, -1).c_str());
+            g_lua.lua_settop(L, top);
+            return;
+        }
+        g_lua.lua_settop(L, top);
+        g_lua.lua_pushstring(L, "SMNet");
+        g_lua.lua_rawget(L, env);
+        if (g_lua.lua_type(L, -1) != LUA_TTABLE) { g_lua.lua_settop(L, top); return; }
+        g_lua.lua_pushcclosure(L, NetNative, 0);
+        g_lua.lua_setfield(L, -2, "__native");
+        if (ext->smnetRef >= 0) g_lua.luaL_unref(L, LUA_REGISTRYINDEX, ext->smnetRef);
+        ext->smnetRef = g_lua.luaL_ref(L, LUA_REGISTRYINDEX);   // pops the table
+        g_lua.lua_settop(L, top);
+        Log("SMNetworking installed in state %p", (void*)L);
+        std::vector<std::pair<std::string, std::string>> mods;
+        { std::lock_guard<std::mutex> lk(g_netMutex); mods = g_netMods; }
+        for (auto& m : mods)
+            CallSMNet(L, "__nativeRegister", [&](lua_State* l) {
+                g_lua.lua_pushstring(l, m.first.c_str());
+                if (m.second.empty()) g_lua.lua_pushnil(l); else g_lua.lua_pushstring(l, m.second.c_str());
+                return 2;
+            });
+    }
+    CallSMNet(L, "__scan", [](lua_State*) { return 0; });
+}
+
+// Queue `fn` on the state SMNet runs in. Returns false if there is none.
+static bool QueueNetJob(std::function<void(lua_State*)> fn) {
+    lua_State* L;
+    { std::lock_guard<std::mutex> lk(g_netMutex); L = g_netState; }
+    if (!L) return false;
+    std::lock_guard<std::mutex> lk(g_stateMutex);
+    StateInfo* s = FindState(L);
+    if (!s) return false;
+    s->jobs.push_back({std::move(fn)});
+    ++g_pendingJobs;
+    return true;
+}
+
+static void NetAddMod(const std::string& mod, const std::string& version) {
+    {
+        std::lock_guard<std::mutex> lk(g_netMutex);
+        bool found = false;
+        for (auto& m : g_netMods)
+            if (m.first == mod) { if (!version.empty()) m.second = version; found = true; }
+        if (!found) g_netMods.push_back({mod, version});
+    }
+    QueueNetJob([mod, version](lua_State* L) {
+        CallSMNet(L, "__nativeRegister", [&](lua_State* l) {
+            g_lua.lua_pushstring(l, mod.c_str());
+            if (version.empty()) g_lua.lua_pushnil(l); else g_lua.lua_pushstring(l, version.c_str());
+            return 2;
+        });
+    });
+}
+
+static void Api_NetRegister(const char* modId, const char* version) {
+    if (!modId || !*modId) return;
+    NetAddMod(modId, version && *version ? version : "1");
+}
+
+static void Api_NetOn(const char* modId, const char* msg, int side, SMNetHandler fn, void* user) {
+    if (!modId || !*modId || !fn) return;
+    {
+        std::lock_guard<std::mutex> lk(g_netMutex);
+        g_netHandlers.push_back({modId, msg && *msg ? msg : "*", side ? side : SMNET_SIDE_BOTH, fn, user});
+    }
+    NetAddMod(modId, "");   // deliver this mod's messages to native code (doesn't register it)
+}
+
+static int Api_NetSend(const char* modId, const char* msg, int target, const char* data, size_t len) {
+    if (!modId || !*modId || !msg || !*msg) return 0;
+    std::string m = modId, n = msg, d = data ? std::string(data, len) : std::string();
+    return QueueNetJob([m, n, d, target](lua_State* L) {
+        CallSMNet(L, "__nativeSend", [&](lua_State* l) {
+            g_lua.lua_pushstring(l, m.c_str());
+            g_lua.lua_pushstring(l, n.c_str());
+            g_lua.lua_pushinteger(l, target);
+            g_lua.lua_pushlstring(l, d.data(), d.size());
+            return 4;
+        });
+    }) ? 1 : 0;
+}
+
+static int Api_NetGetStatus(const char* modId, SMNetStatus* out) {
+    if (!out) return 0;
+    memset(out, 0, sizeof *out);
+    if (!modId) return 0;
+    std::lock_guard<std::mutex> lk(g_netMutex);
+    auto it = g_netStatus.find(modId);
+    if (it == g_netStatus.end()) { out->inWorld = g_netState != nullptr; return 0; }
+    *out = it->second;
+    return 1;
+}
+
 // Native jobs run under lua_cpcall so a lua_error inside them cannot unwind
 // into the game.
 struct CpcallCtx { Job* job; };
@@ -410,6 +744,21 @@ static int CpcallTrampoline(lua_State* L) {
 // Called on the owning thread right before the game's outermost lua_pcall,
 // which is about to call the function at stack index (top - nargs).
 static void SafePoint(lua_State* L, int nargs) {
+    // Per-state SDK work: SMNetworking install check (1/s) and callback hooks.
+    if (StateExt* ext = GetExt(L)) {
+        ULONGLONG now = GetTickCount64();
+        if (now - ext->netCheckAt >= 1000) {
+            ext->netCheckAt = now;
+            int top = g_lua.lua_gettop(L);
+            if (PushGameEnv(L)) EnsureSMNet(L, g_lua.lua_gettop(L));
+            g_lua.lua_settop(L, top);
+        }
+        if (g_haveHooks.load(std::memory_order_relaxed) && nargs >= 0) {
+            int top = g_lua.lua_gettop(L);
+            if (top - nargs >= 1) RunHooks(L, *ext, top - nargs, nargs);
+            g_lua.lua_settop(L, top);
+        }
+    }
     if (g_pendingJobs.load(std::memory_order_relaxed) == 0 && !g_haveTickCallbacks) return;
     std::deque<Job> jobs;
     bool tick = false, haveCallbackJobs = false;
@@ -626,6 +975,11 @@ static void LoadMods() {
     g_api.QueueLuaIn = Api_QueueLuaIn;
     g_api.PatchImport = Api_PatchImport;
     g_api.AddPresentCallback = Api_AddPresentCallback;
+    g_api.AddCallbackHook = Api_AddCallbackHook;
+    g_api.NetRegister = Api_NetRegister;
+    g_api.NetOn = Api_NetOn;
+    g_api.NetSend = Api_NetSend;
+    g_api.NetGetStatus = Api_NetGetStatus;
 
     if (!g_cfg.loadMods) { Log("LoadMods=0, skipping native mods"); return; }
 
@@ -685,7 +1039,10 @@ static lua_State* Hook_luaL_newstate() {
     lua_State* L = o_luaL_newstate();
     {
         std::lock_guard<std::mutex> lk(g_stateMutex);
-        g_states.push_back(StateInfo{L, GetCurrentThreadId()});
+        StateInfo si;
+        si.L = L;
+        g_states.push_back(std::move(si));
+        ++g_stateGen;
         Log("luaL_newstate -> %p (%zu state(s) alive)", (void*)L, g_states.size());
     }
     for (auto& cb : SnapshotCallbacks()) if (cb.OnStateCreated) cb.OnStateCreated(L, cb.user);
@@ -704,7 +1061,17 @@ static void Hook_lua_close(lua_State* L) {
                 g_states.erase(it);
                 break;
             }
+        ++g_stateGen;
         Log("lua_close %p (%zu state(s) alive)", (void*)L, g_states.size());
+    }
+    if (t_extL == L) { t_extL = nullptr; t_ext.reset(); }
+    {
+        std::lock_guard<std::mutex> lk(g_netMutex);
+        if (g_netState == L) {
+            g_netState = nullptr;
+            g_netStatus.clear();
+            Log("SMNetworking: world closed");
+        }
     }
     for (auto& j : orphaned) if (j.done) j.done(0, "the Lua state was closed", j.user);
     o_lua_close(L);

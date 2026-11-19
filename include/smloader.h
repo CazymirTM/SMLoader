@@ -27,8 +27,8 @@
 extern "C" {
 #endif
 
-#define SMLOADER_API_VERSION 1
-#define SMLOADER_VERSION     "1.0.0"
+#define SMLOADER_API_VERSION 2
+#define SMLOADER_VERSION     "1.1.0"
 
 typedef struct lua_State lua_State;
 typedef double    lua_Number;
@@ -135,6 +135,40 @@ typedef struct SMModCallbacks {
 
 typedef void (*SMJobFn)(lua_State* L, void* user);
 
+/* --- SMNetworking (API version 2) ----------------------------------------
+   Synchronized multiplayer messaging between machines that run SMLoader 1.1+.
+   Lua mods use the global table SMNet (see docs/NETWORKING.md); native mods
+   use the functions below. Payloads for native mods are byte strings, usually
+   JSON: Lua tables sent to a native mod arrive JSON-encoded. */
+
+/* NetSend targets (any value >= 0 is a player id: host -> that player) */
+#define SMNET_TO_SERVER  (-1)  /* this machine -> the host                      */
+#define SMNET_TO_ALL     (-2)  /* -> every player with the mod, via the host    */
+#define SMNET_TO_OTHERS  (-3)  /* like SMNET_TO_ALL, but not back to the sender */
+#define SMNET_BROADCAST  (-4)  /* host only: -> every player with the mod       */
+
+/* NetOn sides */
+#define SMNET_SIDE_SERVER 1    /* messages sent to the host (SMNET_TO_SERVER)   */
+#define SMNET_SIDE_CLIENT 2    /* messages sent to players                      */
+#define SMNET_SIDE_BOTH   3
+
+/* Called on the game thread. fromPlayerId: the sender's player id, or 0 when
+   the host's server side sent it (SMNET_BROADCAST / to a player). `data` is
+   valid only during the call and is not NUL-terminated (use len). */
+typedef void (*SMNetHandler)(const char* modId, const char* msg, const char* data, size_t len,
+                             int fromPlayerId, int side, void* user);
+
+typedef struct SMNetStatus {
+    int  inWorld;          /* SMNetworking is running in the current world        */
+    int  connected;        /* the host answered this machine: messages can flow   */
+    int  isHost;           /* this machine hosts the world                        */
+    int  ready;            /* every player in the world has this mod              */
+    int  playerCount;
+    int  missingCount;     /* players known not to have this mod                  */
+    int  localPlayerId;
+    char missing[256];     /* their names, comma-separated (UTF-8, truncated)     */
+} SMNetStatus;
+
 typedef struct SMLoaderAPI {
     uint32_t    version;            /* SMLOADER_API_VERSION */
     const char* loaderDir;          /* absolute path to <game>/SMLoader (UTF-8) */
@@ -192,6 +226,32 @@ typedef struct SMLoaderAPI {
        overlay mods (and the Steam overlay) can coexist without recursion.
        The hook is installed a few seconds after the game window appears. */
     int (*AddPresentCallback)(void (*fn)(void* swapChain, void* user), void* user);
+
+    /* ---- API version 2 (SMLoader 1.1.0) -----------------------------------
+       Check api->version >= 2 before touching these: older loaders don't have
+       them. */
+
+    /* Callback hook: every time the game invokes `callback` (an expression in
+       the game env, e.g. "SurvivalGame.server_onFixedUpdate"), first call the
+       Lua function `handler` (also an expression, e.g. "MyMod.onTick") with
+       the same arguments, inside the callback's engine sandbox. Nothing is
+       wrapped or replaced, so any number of mods can hook the same callback
+       without interfering. Applies to every state, now and later; both
+       expressions are re-resolved every 2 s (hot reloads are followed). */
+    int  (*AddCallbackHook)(const char* callback, const char* handler);
+
+    /* SMNetworking. NetRegister announces that this machine has `modId`
+       (shown to everyone in the roster; SMNetStatus.ready checks it).
+       NetOn receives messages for modId/msg ("*" = every message of modId).
+       NetSend returns nonzero if queued (it is sent on the next game tick);
+       0 if no world is running. All three are thread-safe and may be called
+       from SMMod_Init. */
+    void (*NetRegister)(const char* modId, const char* version);
+    void (*NetOn)(const char* modId, const char* msg, int side, SMNetHandler fn, void* user);
+    int  (*NetSend)(const char* modId, const char* msg, int target, const char* data, size_t len);
+    /* Fills *out (zeroed if unknown); returns nonzero once the status for
+       modId is known (about 1 s after joining a world). */
+    int  (*NetGetStatus)(const char* modId, SMNetStatus* out);
 } SMLoaderAPI;
 
 typedef void (*SMMod_InitFn)(const SMLoaderAPI* api);
