@@ -28,7 +28,7 @@ if SMNet and SMNet.__env == E then return "already installed" end
 local N = {}
 SMNet = N
 N.__env = E
-N.VERSION = "1.1.0"
+N.VERSION = "1.2.0"
 N.PROTOCOL = 1
 N.HELLO_GRACE = 25                     -- seconds a joining player has to say hello
 N.HELLO_GIVE_UP = 30                   -- seconds a client keeps trying to reach the host
@@ -64,6 +64,8 @@ N.requestHandlers = {}                 -- [mod][name] = fn( data, player ) -> re
 N.sharedListeners = {}                 -- [mod] = { fn( key, value ), ... }
 N.rosterListeners = {}                 -- { fn( players ), ... }
 N.nativeMods = {}                      -- [mod] = true: also deliver to native (C++) handlers
+N.serverTickers = {}                   -- { fn( game ), ... } run every host tick
+N.clientTickers = {}                   -- { fn( game ), ... } run every client tick
 
 -- Client state (every machine, including the host)
 local C = { start = nil, helloAt = -100, welcomed = false, gaveUp = false, out = {},
@@ -234,6 +236,16 @@ function N.onShared( mod, fn ) local s = slot( N.sharedListeners, mod ) s[#s + 1
 -- Roster listener (every machine): fn( players ) whenever someone joins, leaves
 -- or changes their mods.
 function N.onRoster( fn ) N.rosterListeners[#N.rosterListeners + 1] = fn end
+-- Per-tick callbacks without wrapping any game function. Server: host only,
+-- inside the game-mode server_onFixedUpdate sandbox (40/s). Client: every
+-- machine, inside client_onFixedUpdate. fn( game ) - game is the game-mode
+-- script instance (self).
+function N.onServerTick( fn ) N.serverTickers[#N.serverTickers + 1] = fn end
+function N.onClientTick( fn ) N.clientTickers[#N.clientTickers + 1] = fn end
+-- Callback hook for Lua mods (same as the native AddCallbackHook, but for this
+-- world only): before the game calls `callback`, call the function named by
+-- `handler` with the same arguments. Both are expressions in the game env.
+function N.addCallbackHook( callback, handler ) native( "hook", callback, handler ) end
 
 local function clQueue( pkt )
 	if C.gaveUp then return false end
@@ -420,6 +432,7 @@ function N.__svTick( game )
 		svQueue( "mod", { k = "S", m = mod, s = set, x = del } )
 	end
 	S.dirty = {}
+	for _, fn in ipairs( N.serverTickers ) do safeCall( fn, game ) end
 	svFlush( game )
 end
 
@@ -508,6 +521,9 @@ function N.__clTick( game )
 		for _, p in ipairs( C.out ) do batch[#batch + 1] = p end
 		C.out = {}
 	end
+	for _, fn in ipairs( N.clientTickers ) do safeCall( fn, game ) end
+	for _, p in ipairs( C.welcomed and C.out or {} ) do batch[#batch + 1] = p end
+	if C.welcomed then C.out = {} end
 	if #batch > 0 then
 		local ok, err = pcall( function() game.network:sendToServer( SV_CB, { v = N.PROTOCOL, b = batch } ) end )
 		if not ok then log( "send to host failed: " .. tostring( err ) ) end

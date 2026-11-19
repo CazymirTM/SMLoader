@@ -170,6 +170,8 @@ struct StateExt {
     bool unresolved = false;
     ULONGLONG netCheckAt = 0;          // last SMNetworking install check
     int smnetRef = -2;                 // registry ref to the installed SMNet table
+    int smdataRef = -2;                // registry ref to the installed SMData table
+    bool smdataFailed = false;         // don't retry a broken install every second
 };
 
 struct StateInfo {
@@ -528,6 +530,7 @@ static int Api_AddCallbackHook(const char* callback, const char* handler) {
 // game env of every world and bridges it to native mods.
 // ---------------------------------------------------------------------------
 #include "smnet_lua.inc"   // kSMNetLua, kSMNetLuaSize
+#include "smdata_lua.inc"  // kSMDataLua, kSMDataLuaSize (SMPlayerData)
 
 struct NetHandlerEntry { std::string mod, msg; int side; SMNetHandler fn; void* user; };
 static std::mutex g_netMutex;                          // guards everything below
@@ -535,6 +538,8 @@ static lua_State* g_netState = nullptr;                // the state SMNet is run
 static std::vector<std::pair<std::string, std::string>> g_netMods;   // native NetRegister / NetOn
 static std::vector<NetHandlerEntry> g_netHandlers;
 static std::map<std::string, SMNetStatus> g_netStatus;
+static std::map<std::string, std::string> g_dataCache;   // "<playerId>|<mod>|<key>" -> JSON (SMPlayerData)
+static int g_localPlayerId = 0;
 
 static const char* kGameClasses[] = {"SurvivalGame", "CreativeGame", "ChallengeGame", "Game"};
 
@@ -582,42 +587,95 @@ static int NetNative(lua_State* L) {
         st.localPlayerId = (int)g_lua.lua_tointeger(L, 9);
         std::lock_guard<std::mutex> lk(g_netMutex);
         g_netStatus[StackString(L, 2)] = st;
+    } else if (kind == "data") {                           // playerId, mod, key, json (SMPlayerData)
+        std::string k = std::to_string((int)g_lua.lua_tointeger(L, 2)) + "|" + StackString(L, 3) + "|" + StackString(L, 4);
+        std::string json = StackString(L, 5);
+        std::lock_guard<std::mutex> lk(g_netMutex);
+        g_dataCache[k] = json;
+    } else if (kind == "local") {                          // local player id
+        std::lock_guard<std::mutex> lk(g_netMutex);
+        g_localPlayerId = (int)g_lua.lua_tointeger(L, 2);
     }
     return 0;
 }
 
-// Call SMNet[fn](args pushed by `push`) in the state's installed SMNet table.
-static void CallSMNet(lua_State* L, const char* fn, const std::function<int(lua_State*)>& push) {
-    StateExt* ext = GetExt(L);
-    if (!ext || ext->smnetRef < 0) return;
+// Call <table>[fn](args pushed by `push`), where `ref` holds the installed
+// SDK table (SMNet or SMData) of this state.
+static void CallSDK(lua_State* L, int ref, const char* label, const char* fn,
+                    const std::function<int(lua_State*)>& push) {
+    if (ref < 0) return;
     int top = g_lua.lua_gettop(L);
     g_lua.lua_pushcclosure(L, TracebackHandler, 0);
-    g_lua.lua_rawgeti(L, LUA_REGISTRYINDEX, ext->smnetRef);
+    g_lua.lua_rawgeti(L, LUA_REGISTRYINDEX, ref);
     g_lua.lua_getfield(L, -1, fn);
     if (g_lua.lua_type(L, -1) == LUA_TFUNCTION) {
         int n = push(L);
         if (o_lua_pcall(L, n, 0, top + 1) != 0)
-            Log("SMNetworking: SMNet.%s failed: %s", fn, ValueToString(L, -1).c_str());
+            Log("%s.%s failed: %s", label, fn, ValueToString(L, -1).c_str());
     }
     g_lua.lua_settop(L, top);
 }
-
-// `env` is the stack index of the game env. Installs SMNet once per env (only
-// in worlds: the env must hold a game-mode class), then lets it look for the
-// game class to hook (cheap; SMNet throttles itself).
-static void EnsureSMNet(lua_State* L, int env) {
+static void CallSMNet(lua_State* L, const char* fn, const std::function<int(lua_State*)>& push) {
     StateExt* ext = GetExt(L);
-    if (!ext) return;
+    if (ext) CallSDK(L, ext->smnetRef, "SMNet", fn, push);
+}
+static void CallSMData(lua_State* L, const char* fn, const std::function<int(lua_State*)>& push) {
+    StateExt* ext = GetExt(L);
+    if (ext) CallSDK(L, ext->smdataRef, "SMData", fn, push);
+}
+
+// Is env[global] an SDK table already installed for this env?
+static bool SDKInstalled(lua_State* L, int env, const char* global) {
     int top = g_lua.lua_gettop(L);
     bool installed = false;
-    g_lua.lua_pushstring(L, "SMNet");
+    g_lua.lua_pushstring(L, global);
     g_lua.lua_rawget(L, env);
     if (g_lua.lua_type(L, -1) == LUA_TTABLE) {
         g_lua.lua_getfield(L, -1, "__env");
         installed = g_lua.lua_rawequal(L, -1, env) != 0;
     }
     g_lua.lua_settop(L, top);
-    if (!installed) {
+    return installed;
+}
+
+// Run an embedded SDK chunk in `env` (passing env as `...`) and keep a
+// registry ref to the global table it defines in *ref.
+static bool InstallSDK(lua_State* L, int env, const char* global, const unsigned char* code, size_t size,
+                       const char* chunkname, int* ref) {
+    int top = g_lua.lua_gettop(L);
+    g_lua.lua_pushcclosure(L, TracebackHandler, 0);
+    if (g_lua.luaL_loadbufferx(L, (const char*)code, size, chunkname, "t") != 0) {
+        Log("%s: compile error: %s", chunkname + 1, ValueToString(L, -1).c_str());
+        g_lua.lua_settop(L, top);
+        return false;
+    }
+    g_lua.lua_pushvalue(L, env);
+    g_lua.lua_setfenv(L, -2);
+    g_lua.lua_pushvalue(L, env);                       // the chunk's `...`
+    if (o_lua_pcall(L, 1, 0, top + 1) != 0) {
+        Log("%s: install error: %s", chunkname + 1, ValueToString(L, -1).c_str());
+        g_lua.lua_settop(L, top);
+        return false;
+    }
+    g_lua.lua_settop(L, top);
+    g_lua.lua_pushstring(L, global);
+    g_lua.lua_rawget(L, env);
+    if (g_lua.lua_type(L, -1) != LUA_TTABLE) { g_lua.lua_settop(L, top); return false; }
+    if (*ref >= 0) g_lua.luaL_unref(L, LUA_REGISTRYINDEX, *ref);
+    *ref = g_lua.luaL_ref(L, LUA_REGISTRYINDEX);       // pops the table
+    g_lua.lua_settop(L, top);
+    return true;
+}
+
+// `env` is the stack index of the game env. Installs the SDK modules once per
+// env (only in worlds: the env must hold a game-mode class): SMNetworking,
+// then SMPlayerData. Then lets them look for classes to hook (cheap; they
+// throttle themselves).
+static void EnsureSMNet(lua_State* L, int env) {
+    StateExt* ext = GetExt(L);
+    if (!ext) return;
+    int top = g_lua.lua_gettop(L);
+    if (!SDKInstalled(L, env, "SMNet")) {
         bool world = false;
         for (const char* c : kGameClasses) {
             g_lua.lua_pushstring(L, c);
@@ -626,28 +684,10 @@ static void EnsureSMNet(lua_State* L, int env) {
             g_lua.lua_settop(L, top);
         }
         if (!world) return;
-        g_lua.lua_pushcclosure(L, TracebackHandler, 0);
-        if (g_lua.luaL_loadbufferx(L, (const char*)kSMNetLua, kSMNetLuaSize, "=SMNetworking", "t") != 0) {
-            Log("SMNetworking: compile error: %s", ValueToString(L, -1).c_str());
-            g_lua.lua_settop(L, top);
-            return;
-        }
-        g_lua.lua_pushvalue(L, env);
-        g_lua.lua_setfenv(L, -2);
-        g_lua.lua_pushvalue(L, env);                       // the chunk's `...`
-        if (o_lua_pcall(L, 1, 0, top + 1) != 0) {
-            Log("SMNetworking: install error: %s", ValueToString(L, -1).c_str());
-            g_lua.lua_settop(L, top);
-            return;
-        }
-        g_lua.lua_settop(L, top);
-        g_lua.lua_pushstring(L, "SMNet");
-        g_lua.lua_rawget(L, env);
-        if (g_lua.lua_type(L, -1) != LUA_TTABLE) { g_lua.lua_settop(L, top); return; }
+        if (!InstallSDK(L, env, "SMNet", kSMNetLua, kSMNetLuaSize, "=SMNetworking", &ext->smnetRef)) return;
+        g_lua.lua_rawgeti(L, LUA_REGISTRYINDEX, ext->smnetRef);
         g_lua.lua_pushcclosure(L, NetNative, 0);
         g_lua.lua_setfield(L, -2, "__native");
-        if (ext->smnetRef >= 0) g_lua.luaL_unref(L, LUA_REGISTRYINDEX, ext->smnetRef);
-        ext->smnetRef = g_lua.luaL_ref(L, LUA_REGISTRYINDEX);   // pops the table
         g_lua.lua_settop(L, top);
         Log("SMNetworking installed in state %p", (void*)L);
         std::vector<std::pair<std::string, std::string>> mods;
@@ -659,7 +699,14 @@ static void EnsureSMNet(lua_State* L, int env) {
                 return 2;
             });
     }
+    if (!ext->smdataFailed && !SDKInstalled(L, env, "SMData")) {
+        if (InstallSDK(L, env, "SMData", kSMDataLua, kSMDataLuaSize, "=SMPlayerData", &ext->smdataRef))
+            Log("SMPlayerData installed in state %p", (void*)L);
+        else
+            ext->smdataFailed = true;
+    }
     CallSMNet(L, "__scan", [](lua_State*) { return 0; });
+    CallSMData(L, "__scan", [](lua_State*) { return 0; });
 }
 
 // Queue `fn` on the state SMNet runs in. Returns false if there is none.
@@ -729,6 +776,74 @@ static int Api_NetGetStatus(const char* modId, SMNetStatus* out) {
     if (it == g_netStatus.end()) { out->inWorld = g_netState != nullptr; return 0; }
     *out = it->second;
     return 1;
+}
+
+// ---------------------------------------------------------------------------
+// SMPlayerData (native API v3)
+// ---------------------------------------------------------------------------
+static int Api_DataGet(int playerId, const char* mod, const char* key, char* out, size_t size) {
+    if (out && size) out[0] = 0;
+    if (!mod || !key) return -1;
+    std::lock_guard<std::mutex> lk(g_netMutex);
+    if (playerId == 0) playerId = g_localPlayerId;
+    auto it = g_dataCache.find(std::to_string(playerId) + "|" + mod + "|" + key);
+    if (it == g_dataCache.end()) return -1;
+    if (out && size) snprintf(out, size, "%s", it->second.c_str());
+    return (int)it->second.size();
+}
+
+static int Api_DataSet(int playerId, const char* mod, const char* key, const char* json) {
+    if (!mod || !*mod || !key || !*key) return 0;
+    std::string m = mod, k = key, j = json ? json : "null";
+    return QueueNetJob([=](lua_State* L) {
+        CallSMData(L, "__nativeSet", [&](lua_State* l) {
+            g_lua.lua_pushinteger(l, playerId);
+            g_lua.lua_pushstring(l, m.c_str());
+            g_lua.lua_pushstring(l, k.c_str());
+            g_lua.lua_pushstring(l, j.c_str());
+            return 4;
+        });
+    }) ? 1 : 0;
+}
+
+static int Api_DataAdd(int playerId, const char* mod, const char* key, double delta) {
+    if (!mod || !*mod || !key || !*key) return 0;
+    std::string m = mod, k = key;
+    return QueueNetJob([=](lua_State* L) {
+        CallSMData(L, "__nativeAdd", [&](lua_State* l) {
+            g_lua.lua_pushinteger(l, playerId);
+            g_lua.lua_pushstring(l, m.c_str());
+            g_lua.lua_pushstring(l, k.c_str());
+            g_lua.lua_pushnumber(l, delta);
+            return 4;
+        });
+    }) ? 1 : 0;
+}
+
+static int Api_DataAddXP(int playerId, const char* mod, double amount) {
+    if (!mod || !*mod) return 0;
+    std::string m = mod;
+    return QueueNetJob([=](lua_State* L) {
+        CallSMData(L, "__nativeAddXP", [&](lua_State* l) {
+            g_lua.lua_pushinteger(l, playerId);
+            g_lua.lua_pushstring(l, m.c_str());
+            g_lua.lua_pushnumber(l, amount);
+            return 3;
+        });
+    }) ? 1 : 0;
+}
+
+static int Api_DataUnlock(int playerId, const char* mod, const char* unlockId) {
+    if (!mod || !*mod || !unlockId || !*unlockId) return 0;
+    std::string m = mod, u = unlockId;
+    return QueueNetJob([=](lua_State* L) {
+        CallSMData(L, "__nativeUnlock", [&](lua_State* l) {
+            g_lua.lua_pushinteger(l, playerId);
+            g_lua.lua_pushstring(l, m.c_str());
+            g_lua.lua_pushstring(l, u.c_str());
+            return 3;
+        });
+    }) ? 1 : 0;
 }
 
 // Native jobs run under lua_cpcall so a lua_error inside them cannot unwind
@@ -980,6 +1095,11 @@ static void LoadMods() {
     g_api.NetOn = Api_NetOn;
     g_api.NetSend = Api_NetSend;
     g_api.NetGetStatus = Api_NetGetStatus;
+    g_api.DataGet = Api_DataGet;
+    g_api.DataSet = Api_DataSet;
+    g_api.DataAdd = Api_DataAdd;
+    g_api.DataAddXP = Api_DataAddXP;
+    g_api.DataUnlock = Api_DataUnlock;
 
     if (!g_cfg.loadMods) { Log("LoadMods=0, skipping native mods"); return; }
 
@@ -1070,6 +1190,8 @@ static void Hook_lua_close(lua_State* L) {
         if (g_netState == L) {
             g_netState = nullptr;
             g_netStatus.clear();
+            g_dataCache.clear();
+            g_localPlayerId = 0;
             Log("SMNetworking: world closed");
         }
     }

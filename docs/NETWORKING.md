@@ -126,6 +126,16 @@ session only; save anything permanent with `sm.storage` on the host.
 Joining players get 25 s to say hello. Until then they count as "not ready"
 but are not listed as missing.
 
+### Ticks and hooks (Lua)
+
+| Function | Notes |
+|---|---|
+| `SMNet.onServerTick(fn(game))` | Every host tick (40/s), inside the game-mode `server_onFixedUpdate` sandbox |
+| `SMNet.onClientTick(fn(game))` | Every client tick on every machine, inside `client_onFixedUpdate` |
+| `SMNet.addCallbackHook(callback, handler)` | Lua version of `AddCallbackHook` for this world, e.g. `("SurvivalPlayer.server_onFixedUpdate", "MyMod.playerTick")` |
+
+None of these wrap game functions.
+
 ### JSON
 
 `SMNet.json.encode(value)` and `SMNet.json.decode(text)` are a small JSON

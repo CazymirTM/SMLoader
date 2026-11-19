@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.2.0 — SMPlayerData
+
+- **SMPlayerData:** persistent player statistics and progression, built into
+  the loader and saved in the world. Every world gets a global `SMData` table
+  (Lua), and native mods get `DataGet` / `DataSet` / `DataAdd` / `DataAddXP` /
+  `DataUnlock` (API version 3).
+  - Automatic stats: playtime, sessions, distance walked and driven. In
+    Survival also deaths, damage taken, robot kills (per type), robot damage,
+    crops harvested and food eaten.
+  - Per-player mod data (private or published), XP with level curves,
+    level-up events and unlocks.
+  - Leaderboards, including offline players on the host.
+  - Each player's own record is synced to them; everyone's stats and published
+    keys are synced to all players.
+  - Guide: `docs/PLAYERDATA.md`.
+- **SMNetworking:** `SMNet.onServerTick` / `SMNet.onClientTick` (per-tick
+  listeners without wrapping) and `SMNet.addCallbackHook` for Lua.
+- New example: **DataDemo** (native SMPlayerData).
+- API version 3. Mods built for 1.0.0 and 1.1.0 keep working unchanged.
+
 ## 1.1.0 — SMNetworking
 
 - **SMNetworking:** tools for multiplayer mods that stay in sync, built into

@@ -1,8 +1,10 @@
-# SMLoader API reference (API version 2)
+# SMLoader API reference (API version 3)
 
-API version 2 (SMLoader 1.1.0) added `AddCallbackHook` and SMNetworking
-(`NetRegister`, `NetOn`, `NetSend`, `NetGetStatus`). Mods that only use
-version 1 features keep working on every loader version.
+- API version 2 (SMLoader 1.1.0) added `AddCallbackHook` and SMNetworking
+  (`NetRegister`, `NetOn`, `NetSend`, `NetGetStatus`).
+- API version 3 (SMLoader 1.2.0) added SMPlayerData (`DataGet`, `DataSet`,
+  `DataAdd`, `DataAddXP`, `DataUnlock`).
+- Mods only need the loader version that matches the features they use.
 
 Everything is declared in [`include/smloader.h`](../include/smloader.h). It is
 plain C, so you can write mods in C or C++.
@@ -134,6 +136,24 @@ int  NetGetStatus(const char* modId, SMNetStatus* out);
 Multiplayer messaging, a roster and the "does everyone have my mod" check.
 Lua mods get the same features through the `SMNet` table. The full guide is in
 [NETWORKING.md](NETWORKING.md).
+
+## SMPlayerData (API v3)
+
+```c
+int DataGet(int playerId, const char* mod, const char* key, char* out, size_t size);
+int DataSet(int playerId, const char* mod, const char* key, const char* json);
+int DataAdd(int playerId, const char* mod, const char* key, double delta);
+int DataAddXP(int playerId, const char* mod, double amount);
+int DataUnlock(int playerId, const char* mod, const char* unlockId);
+```
+Persistent per-player data saved in the world:
+- `playerId` 0 is the local player, and values are JSON.
+- `mod` `"stats"` holds the built-in statistics.
+- The keys `"@xp"`, `"@level"` and `"@unlocks"` hold a mod's progression.
+- Writes take effect on the host only.
+
+Lua mods use the `SMData` table. The full guide is in
+[PLAYERDATA.md](PLAYERDATA.md).
 
 ## Lua environments
 

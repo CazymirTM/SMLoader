@@ -27,8 +27,8 @@
 extern "C" {
 #endif
 
-#define SMLOADER_API_VERSION 2
-#define SMLOADER_VERSION     "1.1.0"
+#define SMLOADER_API_VERSION 3
+#define SMLOADER_VERSION     "1.2.0"
 
 typedef struct lua_State lua_State;
 typedef double    lua_Number;
@@ -252,6 +252,26 @@ typedef struct SMLoaderAPI {
     /* Fills *out (zeroed if unknown); returns nonzero once the status for
        modId is known (about 1 s after joining a world). */
     int  (*NetGetStatus)(const char* modId, SMNetStatus* out);
+
+    /* ---- API version 3 (SMLoader 1.2.0): SMPlayerData ----------------------
+       Persistent per-player data saved in the world (see docs/PLAYERDATA.md).
+       playerId 0 = the local player. Values are JSON text. mod "stats" holds
+       the built-in statistics (playtime, distanceWalked, kills, ...); in any
+       other mod, the keys "@xp", "@level" and "@unlocks" hold progression.
+
+       DataGet copies the JSON of a value into out (NUL-terminated, truncated
+       to size) and returns its full length, or -1 if this machine doesn't
+       know it. The host knows every online player; other machines know their
+       own data and everyone's stats and published keys. Thread-safe.
+
+       The writers queue the change and return nonzero if queued. They only
+       take effect on the host (on other machines they are logged and
+       ignored). */
+    int  (*DataGet)(int playerId, const char* mod, const char* key, char* out, size_t size);
+    int  (*DataSet)(int playerId, const char* mod, const char* key, const char* json);
+    int  (*DataAdd)(int playerId, const char* mod, const char* key, double delta);
+    int  (*DataAddXP)(int playerId, const char* mod, double amount);
+    int  (*DataUnlock)(int playerId, const char* mod, const char* unlockId);
 } SMLoaderAPI;
 
 typedef void (*SMMod_InitFn)(const SMLoaderAPI* api);
