@@ -1,0 +1,33 @@
+SMLoader - native mod loader for Scrap Mechanic
+================================================
+
+Made for Scrap Mechanic 1.0.7a (Steam, Windows 64-bit).
+
+INSTALL
+-------
+1. Find your game folder:
+   Steam -> right-click Scrap Mechanic -> Manage -> Browse local files.
+2. Copy  Release\winmm.dll  from this zip into the game's  Release  folder
+   (next to ScrapMechanic.exe).
+3. Copy the  SMLoader  folder from this zip into the game folder
+   (next to the Release folder).
+4. Put the mods you want (.dll files) into  SMLoader\mods .
+5. Start the game from Steam as usual.
+
+To check it's working, open  SMLoader\loader.log  after starting the game.
+It should start with "SMLoader 1.0.0 starting".
+
+UNINSTALL
+---------
+Delete  Release\winmm.dll . The game is back to normal.
+(You can also delete the SMLoader folder.)
+
+NOTES
+-----
+- "Verify integrity of game files" in Steam does not remove SMLoader;
+  delete winmm.dll yourself to uninstall.
+- A game update may need a new SMLoader version.
+- Only install mods you trust: a mod is a program that runs inside the game.
+
+SMLoader is not affiliated with or endorsed by Axolot Games.
+Source code and modding docs: see the project's GitHub page.

@@ -1,0 +1,14 @@
+# build output
+build/
+dist/
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.dll
+
+# editors
+.vs/
+.vscode/
+*.user
