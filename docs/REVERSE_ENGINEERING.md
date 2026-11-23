@@ -70,6 +70,21 @@ They came from the import table, from strings and code in the binary
 - SMLoader (`EnableAchievements`) replaces only the copy. The checksum, the
   game's own byte and the per-game-mode rules are left alone.
 
+## Client packets
+
+- `NetworkClient` keeps the last server tick it processed (`+0x120`) and the
+  kind of that packet (`+0x124`: 1, 2 or 0). A packet of a newer tick whose kind
+  differs, or that is script data, is copied into a queue (`+0xF8`) and handled
+  on a later client tick.
+- The network fix makes the "first packet" branch before that decision
+  unconditional, so the queue stays empty.
+
+## Physics solver
+
+- Islands are solved with Bullet's `btMLCPSolver` + `btDantzigSolver`. The fast
+  solver replaces vtable slot 1 (`solveMLCP`) of `btDantzigSolver`, found
+  through RTTI.
+
 ## Rendering
 
 - The game uses D3D11 (`D3D11CreateDeviceAndSwapChain`).

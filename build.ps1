@@ -68,16 +68,29 @@ foreach ($mod in @(@('smnet', 'kSMNetLua'), @('smevents', 'kSMEventsLua'), @('sm
 # --- compile ------------------------------------------------------------------
 # NDEBUG + /d1trimfile keep local folder names (e.g. C:\Users\<you>\...) out of the DLLs.
 $common = '/nologo', '/O2', '/MT', '/EHsc', '/std:c++17', '/W3', '/utf-8', '/DUNICODE', '/D_UNICODE', '/D_CRT_SECURE_NO_WARNINGS', '/DNDEBUG', "/d1trimfile:$src\"
-function Build-Dll($name, $sources, $extra = @()) {
+function Build-Dll($name, $sources, $extra = @(), $link = @()) {
     $objDir = Join-Path $out "obj\$name"
     New-Item -ItemType Directory -Force $objDir | Out-Null
     Push-Location $objDir   # objects land here; avoids /Fo"dir\" quoting trouble with spaces
     try {
-        & cl @common @extra @sources /LD "/Fe$(Join-Path $out "$name.dll")" /link /NOLOGO user32.lib kernel32.lib
+        & cl @common @extra @sources /LD "/Fe$(Join-Path $out "$name.dll")" /link /NOLOGO user32.lib kernel32.lib @link
         if ($LASTEXITCODE -ne 0) { throw "build of $name failed" }
     } finally { Pop-Location }
 }
-Build-Dll 'winmm' @("$src\loader\loader.cpp") @("/I$out")
+# The solver is the only code built for AVX2; the loader checks the CPU before it uses it. Its object comes
+# LAST: the linker keeps the first copy of an inline function it sees, so nothing that runs on every CPU can
+# end up with an AVX2 copy.
+$avx = Join-Path $out 'obj\avx2'
+New-Item -ItemType Directory -Force $avx | Out-Null
+Push-Location $avx
+try {
+    & cl @common /arch:AVX2 /c "$src\loader\fixes\fastlcp.cpp"
+    if ($LASTEXITCODE -ne 0) { throw 'build of fastlcp failed' }
+} finally { Pop-Location }
+Build-Dll 'winmm' @("$src\loader\loader.cpp", "$src\loader\fixes\fixes.cpp", (Join-Path $avx 'fastlcp.obj')) @("/I$out") @("/MAP:$(Join-Path $out 'winmm.map')")
+# Check that: no shared C++ library function and no start-up code may come from the AVX2 object.
+$leaks = Select-String -Path (Join-Path $out 'winmm.map') -Pattern 'fastlcp\.obj' | Where-Object { $_.Line -match '@exception@std@@|bad_alloc@std@@|\?\?__E' }
+if ($leaks) { throw "AVX2 code would run on every CPU: $($leaks[0].Line.Trim())" }
 $examples = @()
 foreach ($dir in Get-ChildItem (Join-Path $src 'examples') -Directory) {
     $sources = @(Get-ChildItem $dir.FullName -Filter *.cpp | ForEach-Object FullName)
@@ -96,7 +109,7 @@ if ($Package) {
     $p = Join-Path $stage 'SMLoader'
     New-Item -ItemType Directory -Force (Join-Path $p 'Release'), (Join-Path $p 'SMLoader\mods') | Out-Null
     Copy-Item (Join-Path $out 'winmm.dll') (Join-Path $p 'Release')
-    Copy-Item (Join-Path $src 'LICENSE') $p
+    Copy-Item (Join-Path $src 'LICENSE'), (Join-Path $src 'THIRD_PARTY_NOTICES.md') $p
     Copy-Item (Join-Path $src 'docs\INSTALL.txt') (Join-Path $p 'README.txt')
     Set-Content -Encoding ascii (Join-Path $p 'SMLoader\mods\Put mods here.txt') 'Put SMLoader mod DLLs in this folder.'
     $zip1 = Join-Path $dist "SMLoader-v$version.zip"

@@ -20,7 +20,7 @@ they load, and the screen, for menus and overlays.
 
 ## Install (players)
 
-1. Download `SMLoader-v1.3.0.zip` from **Releases**.
+1. Download `SMLoader-v1.4.0.zip` from **Releases**.
 2. Open your game folder: Steam → right-click Scrap Mechanic → *Manage* →
    *Browse local files*.
 3. Copy `Release\winmm.dll` into the game's `Release` folder (next to
@@ -28,7 +28,7 @@ they load, and the screen, for menus and overlays.
 4. Copy the `SMLoader` folder into the game folder (next to `Release`).
 5. Put mod `.dll` files in `SMLoader\mods\` and start the game normally.
 
-To check it worked, `SMLoader\loader.log` should start with `SMLoader 1.3.0 starting`.
+To check it worked, `SMLoader\loader.log` should start with `SMLoader 1.4.0 starting`.
 **Uninstall:** delete `Release\winmm.dll`. Steam's "verify files" won't remove
 it for you.
 
@@ -54,6 +54,33 @@ Scrap Mechanic\
 | `EnableOverrides` | `1` | Replace game scripts with files from `SMLoader\overrides\` |
 | `LoadMods` | `1` | Load DLLs from `SMLoader\mods\` |
 | `Achievements` | `1` | Keep Steam achievements working when a mod changes the game's data. `0` = the game's own rule: no achievements while its data files are modified |
+
+`[fixes]` section:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `NetworkFix` | `1` | When you join someone's world, handle network packets as they arrive instead of postponing them |
+| `FastPhysics` | `1` | Faster constraint solver for big creations, same results (needs a CPU with AVX2) |
+| `PhysicsVerify` | `0` | For testing: check this many solves against the game's own solver and log the difference |
+| `PhysicsLogSeconds` | `0` | For testing: log solver statistics every so many seconds |
+
+## Built-in fixes
+
+Things the game could do better, fixed by the loader. Each one checks the
+game's code first and leaves it alone if it isn't the code it knows.
+
+- **Network fix** (for players who join a world): the game postpones some
+  packets to a later tick, so a joined player can fall further and further
+  behind the host. With the fix, packets are handled as they arrive. It does
+  nothing for the host. Not yet tested in co-op on 1.0.7a.
+- **Fast physics:** the game's exact joint and contact solver is replaced by a
+  faster build of the same algorithm. Measured on 1.0.7a with a 43-body,
+  93-joint vehicle: about 3 times faster (5.4 → 1.7 ms per solve), with results
+  within 0.1% of the game's. It helps when that solver is what costs time, for
+  example big creations with many bearings and pistons in motion; other causes
+  of lag are not affected. If it can't solve a problem, the game's solver does.
+
+Credits and licences: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ---
 

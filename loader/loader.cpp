@@ -30,6 +30,7 @@
 #include <vector>
 
 #include "../include/smloader.h"
+#include "fixes/fixes.h"
 #include "forwards.inc"   // #pragma comment(linker, "/export:...") forwarders
 
 #pragma comment(lib, "d3d11.lib")
@@ -106,7 +107,13 @@ static void InitPaths() {
                   "; load native mods from SMLoader\\mods\\*.dll\n"
                   "LoadMods=1\n"
                   "; keep Steam achievements working when a mod changes the game's data\n"
-                  "Achievements=1\n", f);
+                  "Achievements=1\n"
+                  "\n"
+                  "[fixes]\n"
+                  "; process network packets as they arrive (helps when you join someone's world)\n"
+                  "NetworkFix=1\n"
+                  "; faster physics solver for big creations, same results\n"
+                  "FastPhysics=1\n", f);
             fclose(f);
         }
     }
@@ -1560,36 +1567,19 @@ static void EnableAchievements() {
         0x0F, 0xB6, 0x82, 0xF0, 0x00, 0x00, 0x00,   // movzx eax, byte [rdx+F0h]     core files modified?
         0x88, 0x81, 0x77, 0x03, 0x00, 0x00,         // mov   [rcx+377h], al
     };
-    const size_t len = std::size(sig), patchAt = 14;
+    const size_t patchAt = 14;
     static const BYTE patch[7] = {0x31, 0xC0, 0x0F, 0x1F, 0x44, 0x00, 0x00};   // xor eax, eax; nop
 
-    auto base = (BYTE*)GetModuleHandleW(nullptr);
-    auto nt = (IMAGE_NT_HEADERS*)(base + ((IMAGE_DOS_HEADER*)base)->e_lfanew);
-    auto sec = IMAGE_FIRST_SECTION(nt);
-    BYTE* found = nullptr;
     int matches = 0;
-    for (WORD s = 0; s < nt->FileHeader.NumberOfSections; ++s, ++sec) {
-        if (!(sec->Characteristics & IMAGE_SCN_MEM_EXECUTE) || sec->Misc.VirtualSize < len) continue;
-        BYTE* b = base + sec->VirtualAddress;
-        for (BYTE* p = b; p <= b + sec->Misc.VirtualSize - len; ++p) {
-            if (p[0] != sig[0] || p[1] != sig[1]) continue;
-            size_t k = 2;
-            while (k < len && (sig[k] < 0 || p[k] == sig[k])) ++k;
-            if (k == len) { found = p; ++matches; }
-        }
-    }
-    if (matches != 1) {
+    unsigned char* at = FindCode(sig, std::size(sig), &matches);
+    if (!at) {
         Log("achievements: this game version is not recognised (%d matches), left as the game has it", matches);
         return;
     }
-    DWORD old;
-    if (!VirtualProtect(found + patchAt, sizeof patch, PAGE_EXECUTE_READWRITE, &old)) {
+    if (!PatchCode(at + patchAt, patch, sizeof patch)) {
         Log("achievements: could not patch (error %lu)", GetLastError());
         return;
     }
-    memcpy(found + patchAt, patch, sizeof patch);
-    VirtualProtect(found + patchAt, sizeof patch, old, &old);
-    FlushInstructionCache(GetCurrentProcess(), found + patchAt, sizeof patch);
     Log("achievements: stay on when mods change the game's data");
 }
 
@@ -1629,6 +1619,7 @@ static void LoadMods() {
     g_api.WorldState = Api_WorldState;
 
     EnableAchievements();
+    InstallGameFixes((g_loaderDirW + L"\\loader.ini").c_str(), Log);
 
     if (!g_cfg.loadMods) { Log("LoadMods=0, skipping native mods"); return; }
 

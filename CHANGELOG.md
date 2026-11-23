@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.4.0 — Game fixes
+
+- **Network fix:** when you join someone's world, network packets are handled
+  as they arrive instead of being postponed, so you don't fall behind the host.
+  The idea comes from Scrap-Mods' networking-fix; the patch was written for
+  SMLoader. Not yet tested in co-op on 1.0.7a. Off with `NetworkFix=0`.
+- **Fast physics:** FastPhysics' constraint solver is built in: the same
+  algorithm as the game's, about 3 times faster on big creations with many
+  joints, results within 0.1% of the game's. Off with `FastPhysics=0`.
+  - FastPhysics' reflection-probe and navmesh patches are not included: the
+    game fixed both itself in 1.0.7.
+- Each fix checks the game's code first and leaves it alone if it doesn't
+  recognise it. Settings are in the new `[fixes]` section of `loader.ini`.
+- No API changes (still version 3): existing mods keep working unchanged.
+
 ## 1.3.0 — Steam achievements
 
 - **Steam achievements stay on** when a mod changes the game's data files, for
