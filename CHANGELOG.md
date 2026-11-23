@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.3.0 — Steam achievements
+
+- **Steam achievements stay on** when a mod changes the game's data files, for
+  example by adding a part. The game normally stops counting them in that case.
+  - Only that one switch is affected: the multiplayer file checks and the
+    game's own achievement rules (such as which game modes count) are unchanged.
+  - Turn it off with `Achievements=0` in `loader.ini`.
+- No API changes (still version 3): existing mods keep working unchanged.
+
 ## 1.2.0 — SMPlayerData, SMEvents and SMExtensions
 
 - **SMPlayerData:** persistent player statistics and progression, built into

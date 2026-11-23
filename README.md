@@ -20,7 +20,7 @@ they load, and the screen, for menus and overlays.
 
 ## Install (players)
 
-1. Download `SMLoader-v1.2.0.zip` from **Releases**.
+1. Download `SMLoader-v1.3.0.zip` from **Releases**.
 2. Open your game folder: Steam → right-click Scrap Mechanic → *Manage* →
    *Browse local files*.
 3. Copy `Release\winmm.dll` into the game's `Release` folder (next to
@@ -28,7 +28,7 @@ they load, and the screen, for menus and overlays.
 4. Copy the `SMLoader` folder into the game folder (next to `Release`).
 5. Put mod `.dll` files in `SMLoader\mods\` and start the game normally.
 
-To check it worked, `SMLoader\loader.log` should start with `SMLoader 1.2.0 starting`.
+To check it worked, `SMLoader\loader.log` should start with `SMLoader 1.3.0 starting`.
 **Uninstall:** delete `Release\winmm.dll`. Steam's "verify files" won't remove
 it for you.
 
@@ -53,6 +53,7 @@ Scrap Mechanic\
 | `LogScriptLoads` | `0` | Log every Lua script the game compiles (handy when modding) |
 | `EnableOverrides` | `1` | Replace game scripts with files from `SMLoader\overrides\` |
 | `LoadMods` | `1` | Load DLLs from `SMLoader\mods\` |
+| `Achievements` | `1` | Keep Steam achievements working when a mod changes the game's data. `0` = the game's own rule: no achievements while its data files are modified |
 
 ---
 

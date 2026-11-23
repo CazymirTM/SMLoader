@@ -28,7 +28,7 @@ extern "C" {
 #endif
 
 #define SMLOADER_API_VERSION 3
-#define SMLOADER_VERSION     "1.2.0"
+#define SMLOADER_VERSION     "1.3.0"
 
 typedef struct lua_State lua_State;
 typedef double    lua_Number;

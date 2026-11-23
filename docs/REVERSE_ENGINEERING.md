@@ -60,6 +60,16 @@ They came from the import table, from strings and code in the binary
   attach script-imported bodies. The Lift tool only selects all-dynamic
   creations.
 
+## Achievements
+
+- When a server starts, the game checksums its core data files and compares the
+  result with a constant in the exe. A mismatch sets "core files modified" on
+  the game (`+0xF0`), which is copied to the achievement manager (`+0x377`).
+- While that byte is set, every achievement event is dropped ("Achievement
+  Event will not be processed core files modified").
+- SMLoader (`EnableAchievements`) replaces only the copy. The checksum, the
+  game's own byte and the per-game-mode rules are left alone.
+
 ## Rendering
 
 - The game uses D3D11 (`D3D11CreateDeviceAndSwapChain`).
