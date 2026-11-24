@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.5.0 — SMContent and SMAudio
+
+- **SMContent:** mods can add or edit the game's data files in memory (parts,
+  tools, projectiles, effects, recipes, texts, icons) with `ContentAdd`,
+  `ContentEdit` and `ContentAddIcon` (API version 4). Several mods can edit the
+  same file. Works alongside SMWaystones 1.0, which has its own copy of this.
+  - Meshes and textures too. The game converts them once; the result is kept
+    in `SMLoader\content\cache`, never in the game's own cache.
+  - An edit that would leave a file with invalid JSON is skipped and logged.
+- **SMAudio:** mods can play their own sound files (`.ogg`, `.wav`, `.mp3`)
+  through the game's sound engine, in 3D and under the player's volume sliders:
+  `AudioAdd` (C++) and the `SMAudio` table (Lua).
+- Fixed a rare crash at startup when a mod hooks a game import: the hook could
+  run before its "original" pointer was set.
+- The loader now only starts inside `ScrapMechanic.exe`. The game's other
+  programs (such as the crash reporter) also loaded it, which overwrote
+  `loader.log` and could crash them.
+- Existing mods keep working unchanged.
+
 ## 1.4.0 — Game fixes
 
 - **Network fix:** when you join someone's world, network packets are handled

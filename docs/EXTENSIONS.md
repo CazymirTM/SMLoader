@@ -142,7 +142,7 @@ The data is **per user, not per world**. For per-world, per-player data use
 | `SMX.date(fmt?, unixTime?)` | Like `os.date`; the default format is `"%Y-%m-%d %H:%M:%S"` |
 | `SMX.profile(name, thresholdMs, fn, ...)` | Runs `fn`, logs the time taken to `loader.log` if it's at least the threshold, and returns `fn`'s results |
 | `SMX.log(...)` | A line in `SMLoader\loader.log`, prefixed `[lua]` |
-| `SMX.loader` | `{ version = "1.4.0", api = 3, mods = { "MyMod.dll", ... } }` |
+| `SMX.loader` | `{ version = "1.5.0", api = 4, mods = { "MyMod.dll", ... } }` |
 
 ## Native API
 

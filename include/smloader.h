@@ -27,8 +27,8 @@
 extern "C" {
 #endif
 
-#define SMLOADER_API_VERSION 3
-#define SMLOADER_VERSION     "1.4.0"
+#define SMLOADER_API_VERSION 4
+#define SMLOADER_VERSION     "1.5.0"
 
 typedef struct lua_State lua_State;
 typedef double    lua_Number;
@@ -170,6 +170,14 @@ typedef void (*SMEventFn)(const char* name, const char* json, size_t len, int fr
 
 /* --- SMExtensions (API version 3) ---------------------------------------- */
 typedef int (*SMExtFn)(const char* argsJson, size_t len, char* out, size_t outSize, void* user);
+
+/* --- SMContent (API version 4) --------------------------------------------
+   Receives the file's current text ("" if the game has no such file) and
+   returns the text the game should see, with its length in *outLen, or NULL to
+   leave the file alone. The returned memory must stay valid until the next
+   call of the same function. May be called from any thread, one at a time. */
+typedef const char* (*SMContentEditFn)(const char* gamePath, const char* base, size_t len,
+                                       size_t* outLen, void* user);
 
 typedef struct SMNetStatus {
     int  inWorld;          /* SMNetworking is running in the current world        */
@@ -324,6 +332,31 @@ typedef struct SMLoaderAPI {
     int  (*ExtRegisterRaw)(const char* name, lua_CFunction fn);
     const char* (*ExtToken)(const char* modId);
     lua_State* (*WorldState)(void);
+
+    /* ---- API version 4 (SMLoader 1.5.0): SMContent -------------------------
+       Add or edit the game's data files (shape sets, tool sets, recipes,
+       descriptions, icons, scripts) in memory; nothing in the game folder is
+       changed. See docs/CONTENT.md. gamePath is a game path such as
+       "$SURVIVAL_DATA/Objects/Database/shapesets.json" ($SURVIVAL_DATA,
+       $GAME_DATA or $CHALLENGE_DATA). Any number of mods can edit the same
+       file: edits run in registration order, each on the previous result.
+
+       Only call these from SMMod_Init (the game reads its data right after).
+       They return nonzero if registered; whether this game version supports
+       content is reported in the log when the game starts.
+
+       ContentAdd: serve a whole file (new, or replacing the game's).
+       ContentEdit: change a file's text when the game reads it.
+       ContentAddIcon: inventory icon of a Survival item, 96x96 pixels BGRA,
+       top row first (copied). */
+    int  (*ContentAdd)(const char* gamePath, const char* text, size_t len);
+    int  (*ContentEdit)(const char* gamePath, SMContentEditFn fn, void* user);
+    int  (*ContentAddIcon)(const char* itemUuid, const unsigned char* bgra96);
+
+    /* SMAudio (also API version 4): register a sound file (.ogg, .wav, .mp3;
+       copied) under a name such as "mymod.shot". Lua plays it with
+       SMAudio.play (see docs/AUDIO.md). Call from SMMod_Init. */
+    int  (*AudioAdd)(const char* name, const void* data, size_t len);
 } SMLoaderAPI;
 
 typedef void (*SMMod_InitFn)(const SMLoaderAPI* api);

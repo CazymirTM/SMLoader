@@ -1,4 +1,4 @@
-# SMLoader API reference (API version 3)
+# SMLoader API reference (API version 4)
 
 - API version 2 (SMLoader 1.1.0) added `AddCallbackHook` and SMNetworking
   (`NetRegister`, `NetOn`, `NetSend`, `NetGetStatus`).
@@ -6,6 +6,8 @@
   `DataAdd`, `DataAddXP`, `DataUnlock`), SMEvents (`EventOn`, `EventOff`,
   `EventEmit`, `EventEmitTo`) and SMExtensions (`ExtRegister`, `ExtRegisterRaw`,
   `ExtToken`, `WorldState`).
+- API version 4 (SMLoader 1.5.0) added SMContent (`ContentAdd`, `ContentEdit`,
+  `ContentAddIcon`) and SMAudio (`AudioAdd`).
 - Mods only need the loader version that matches the features they use.
 
 Everything is declared in [`include/smloader.h`](../include/smloader.h). It is
@@ -181,6 +183,25 @@ lua_State* WorldState(void);                                // the world's Lua s
   world's state for `QueueLua`.
 - Lua also gets timers, hotkeys, metatables and utilities through `SMX`.
 - The full guide is in [EXTENSIONS.md](EXTENSIONS.md).
+
+## SMContent (API v4)
+
+```c
+int ContentAdd(const char* gamePath, const char* text, size_t len);
+int ContentEdit(const char* gamePath, SMContentEditFn fn, void* user);
+int ContentAddIcon(const char* itemUuid, const unsigned char* bgra96);
+```
+- Add or edit the game's data files in memory: items, recipes, texts, icons.
+- Call from `SMMod_Init` only.
+- The full guide is in [CONTENT.md](CONTENT.md).
+
+## SMAudio (API v4)
+
+```c
+int AudioAdd(const char* name, const void* data, size_t len);   // Lua: SMAudio.play( name, options )
+```
+- Your own sound files, played by the game's sound engine.
+- The full guide is in [AUDIO.md](AUDIO.md).
 
 ## Lua environments
 

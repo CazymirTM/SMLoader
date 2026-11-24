@@ -20,7 +20,7 @@ they load, and the screen, for menus and overlays.
 
 ## Install (players)
 
-1. Download `SMLoader-v1.4.0.zip` from **Releases**.
+1. Download `SMLoader-v1.5.0.zip` from **Releases**.
 2. Open your game folder: Steam → right-click Scrap Mechanic → *Manage* →
    *Browse local files*.
 3. Copy `Release\winmm.dll` into the game's `Release` folder (next to
@@ -28,7 +28,7 @@ they load, and the screen, for menus and overlays.
 4. Copy the `SMLoader` folder into the game folder (next to `Release`).
 5. Put mod `.dll` files in `SMLoader\mods\` and start the game normally.
 
-To check it worked, `SMLoader\loader.log` should start with `SMLoader 1.4.0 starting`.
+To check it worked, `SMLoader\loader.log` should start with `SMLoader 1.5.0 starting`.
 **Uninstall:** delete `Release\winmm.dll`. Steam's "verify files" won't remove
 it for you.
 
@@ -137,6 +137,8 @@ rename it, and build.
 | `AddCallbackHook("SurvivalGame.server_onFixedUpdate", "MyMod.tick")` | Run your Lua function before a game callback, without wrapping it (several mods can share a callback) |
 | `ExtRegister` / `ExtRegisterRaw` / `ExtToken` / `WorldState` | **SMExtensions**: expose your C++ functions to Lua (`SMX.fn.mymod.fn(...)`), give your Lua its private file folder, get the world's Lua state ([guide](docs/EXTENSIONS.md)) |
 | `EventOn` / `EventOff` / `EventEmit` / `EventEmitTo` | **SMEvents**: subscribe to and emit events shared with Lua mods and the SDK (`robot.killed`, `player.joined`, ...). Lua mods use the `SMEvents` table ([guide](docs/EVENTS.md)) |
+| `ContentAdd` / `ContentEdit` / `ContentAddIcon` | **SMContent**: add items, recipes, texts and icons to the game in memory ([guide](docs/CONTENT.md)) |
+| `AudioAdd` | **SMAudio**: play your own sound files in 3D through the game's sound engine, from Lua with `SMAudio.play` ([guide](docs/AUDIO.md)) |
 | `DataGet` / `DataSet` / `DataAdd` / `DataAddXP` / `DataUnlock` | **SMPlayerData**: per-player stats, mod data, XP and unlocks saved in the world. Lua mods use the `SMData` table ([guide](docs/PLAYERDATA.md)) |
 | `NetRegister` / `NetOn` / `NetSend` / `NetGetStatus` | **SMNetworking**: multiplayer messages, a roster and the "does everyone have my mod?" check. Lua mods use the `SMNet` table instead ([guide](docs/NETWORKING.md)) |
 

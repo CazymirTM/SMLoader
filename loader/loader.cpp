@@ -31,6 +31,8 @@
 
 #include "../include/smloader.h"
 #include "fixes/fixes.h"
+#include "content/content.h"
+#include "audio/audio.h"
 #include "forwards.inc"   // #pragma comment(linker, "/export:...") forwarders
 
 #pragma comment(lib, "d3d11.lib")
@@ -188,6 +190,8 @@ struct StateExt {
     int smeventsRef = -2;              // registry ref to the installed SMEvents table
     int smextRef = -2;                 // registry ref to the installed SMX table
     bool smextFailed = false;
+    int smaudioRef = -2;               // registry ref to the installed SMAudio table
+    bool smaudioFailed = false;
     bool smeventsFailed = false;
     bool smdataFailed = false;         // don't retry a broken install every second
 };
@@ -550,6 +554,7 @@ static int Api_AddCallbackHook(const char* callback, const char* handler) {
 #include "smnet_lua.inc"   // kSMNetLua, kSMNetLuaSize
 #include "smevents_lua.inc"  // kSMEventsLua, kSMEventsLuaSize (SMEvents)
 #include "smdata_lua.inc"  // kSMDataLua, kSMDataLuaSize (SMPlayerData)
+#include "smaudio_lua.inc" // kSMAudioLua, kSMAudioLuaSize (SMAudio)
 #include "smext_lua.inc"   // kSMExtLua, kSMExtLuaSize (SMExtensions)
 
 struct NetHandlerEntry { std::string mod, msg; int side; SMNetHandler fn; void* user; };
@@ -795,6 +800,12 @@ static void EnsureSMNet(lua_State* L, int env) {
         } else {
             ext->smextFailed = true;
         }
+    }
+    if (!ext->smaudioFailed && !SDKInstalled(L, env, "SMAudio")) {
+        if (InstallSDK(L, env, "SMAudio", kSMAudioLua, kSMAudioLuaSize, "=SMAudio", &ext->smaudioRef, Audio_PushNatives))
+            Log("SMAudio installed in state %p", (void*)L);
+        else
+            ext->smaudioFailed = true;
     }
     CallSMNet(L, "__scan", [](lua_State*) { return 0; });
     CallSMData(L, "__scan", [](lua_State*) { return 0; });
@@ -1375,20 +1386,27 @@ static void SafePoint(lua_State* L, int nargs) {
     }
 }
 
+static void** FindImportSlot(HMODULE module, const char* dllName, const char* funcName);
+static void WriteSlot(void** slot, void* value);
 static bool PatchImport(HMODULE module, const char* dllName, const char* funcName, void* hook,
                         void** previous);
 
 static int Api_PatchImport(const char* dll, const char* func, void* hook, void** original) {
     HMODULE target = GetModuleHandleA(dll);
     void* real = target ? (void*)GetProcAddress(target, func) : nullptr;
-    void* prev = nullptr;
-    if (!PatchImport(GetModuleHandleW(nullptr), dll, func, hook, &prev)) {
+    void** slot = FindImportSlot(GetModuleHandleW(nullptr), dll, func);
+    if (!slot) {
         Log("PatchImport %s!%s: not imported by the game", dll, func);
         return 0;
     }
+    void* prev = *slot;
     // If another mod already redirected this import, hand back ITS hook so the
     // calls chain (mod B -> mod A -> real). Otherwise the real function.
+    // *original must be set first: the game's threads call the hook the moment
+    // the slot changes.
     if (original) *original = (prev && prev != real && prev != hook) ? prev : (real ? real : prev);
+    MemoryBarrier();
+    WriteSlot(slot, hook);
     Log("PatchImport %s!%s -> %p", dll, func, hook);
     return 1;
 }
@@ -1617,9 +1635,15 @@ static void LoadMods() {
     g_api.ExtRegisterRaw = Api_ExtRegisterRaw;
     g_api.ExtToken = Api_ExtToken;
     g_api.WorldState = Api_WorldState;
+    g_api.ContentAdd = Content_Add;
+    g_api.ContentEdit = Content_Edit;
+    g_api.ContentAddIcon = Content_AddIcon;
+    g_api.AudioAdd = Audio_Add;
 
     EnableAchievements();
     InstallGameFixes((g_loaderDirW + L"\\loader.ini").c_str(), Log);
+
+    Audio_Init(&g_lua, Log, Api_PatchImport);
 
     if (!g_cfg.loadMods) { Log("LoadMods=0, skipping native mods"); return; }
 
@@ -1641,6 +1665,7 @@ static void LoadMods() {
     } while (FindNextFileW(h, &fd));
     FindClose(h);
     Log("%zu native mod(s) loaded", g_mods.size());
+    Content_Install(g_loaderDirW.c_str(), Log, Api_PatchImport);   // after the mods, so it chains to their hooks
 }
 
 // ---------------------------------------------------------------------------
@@ -1718,6 +1743,7 @@ static void Hook_lua_close(lua_State* L) {
             Log("SMNetworking: world closed");
         }
     }
+    if (worldClosed) Audio_StopAll();
     if (worldClosed) DispatchNativeEvent("world.closed", "null", 0, 0);   // native only: Lua is going away
     for (auto& j : orphaned) if (j.done) j.done(0, "the Lua state was closed", j.user);
     o_lua_close(L);
@@ -1752,15 +1778,30 @@ static int Hook_lua_pcall(lua_State* L, int nargs, int nresults, int errfunc) {
     return r;
 }
 
+static void WriteSlot(void** slot, void* value) {
+    DWORD old;
+    VirtualProtect(slot, sizeof(void*), PAGE_READWRITE, &old);
+    InterlockedExchangePointer(slot, value);
+    VirtualProtect(slot, sizeof(void*), old, &old);
+}
+
 // Replace one IAT slot. Returns true if found; *previous receives the old slot
 // value so the caller can check the loader had already bound it.
 static bool PatchImport(HMODULE module, const char* dllName, const char* funcName, void* hook,
                         void** previous) {
+    void** slot = FindImportSlot(module, dllName, funcName);
+    if (!slot) return false;
+    *previous = *slot;
+    WriteSlot(slot, hook);
+    return true;
+}
+
+static void** FindImportSlot(HMODULE module, const char* dllName, const char* funcName) {
     auto base = (BYTE*)module;
     auto dos = (IMAGE_DOS_HEADER*)base;
     auto nt = (IMAGE_NT_HEADERS*)(base + dos->e_lfanew);
     auto& dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
-    if (!dir.VirtualAddress) return false;
+    if (!dir.VirtualAddress) return nullptr;
     for (auto imp = (IMAGE_IMPORT_DESCRIPTOR*)(base + dir.VirtualAddress); imp->Name; ++imp) {
         if (_stricmp((const char*)(base + imp->Name), dllName) != 0) continue;
         auto names = (IMAGE_THUNK_DATA*)(base + (imp->OriginalFirstThunk ? imp->OriginalFirstThunk : imp->FirstThunk));
@@ -1769,15 +1810,10 @@ static bool PatchImport(HMODULE module, const char* dllName, const char* funcNam
             if (IMAGE_SNAP_BY_ORDINAL(names->u1.Ordinal)) continue;
             auto byName = (IMAGE_IMPORT_BY_NAME*)(base + names->u1.AddressOfData);
             if (strcmp((const char*)byName->Name, funcName) != 0) continue;
-            DWORD old;
-            *previous = (void*)slots->u1.Function;
-            VirtualProtect(&slots->u1.Function, sizeof(void*), PAGE_READWRITE, &old);
-            slots->u1.Function = (ULONG_PTR)hook;
-            VirtualProtect(&slots->u1.Function, sizeof(void*), old, &old);
-            return true;
+            return (void**)&slots->u1.Function;
         }
     }
-    return false;
+    return nullptr;
 }
 
 static void InstallHooks() {
@@ -1863,9 +1899,17 @@ static LONG CALLBACK CrashHandler(PEXCEPTION_POINTERS ep) {
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
+static bool IsTheGame() {
+    wchar_t path[MAX_PATH * 4];
+    DWORD n = GetModuleFileNameW(nullptr, path, MAX_PATH * 4);
+    const wchar_t* name = n ? wcsrchr(path, L'\\') : nullptr;
+    return name && _wcsicmp(name + 1, L"ScrapMechanic.exe") == 0;
+}
+
 BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(inst);
+        if (!IsTheGame()) return TRUE;   // the tools next to it (crash reporter, content compiler) load winmm.dll too
         InitPaths();
         Log("SMLoader %s starting (api v%d), loader dir %s", SMLOADER_VERSION, SMLOADER_API_VERSION, g_loaderDirU8.c_str());
         AddVectoredExceptionHandler(1, CrashHandler);
@@ -1876,7 +1920,7 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID) {
         if (HANDLE t = CreateThread(nullptr, 0, [](LPVOID) -> DWORD {
                 std::call_once(g_modsOnce, LoadMods); return 0; }, nullptr, 0, nullptr))
             CloseHandle(t);
-    } else if (reason == DLL_PROCESS_DETACH) {
+    } else if (reason == DLL_PROCESS_DETACH && g_log) {
         Log("SMLoader shutting down");
         if (g_log) { fclose(g_log); g_log = nullptr; }
     }
