@@ -15,7 +15,7 @@ INSTALL
 5. Start the game from Steam as usual.
 
 To check it's working, open  SMLoader\loader.log  after starting the game.
-It should start with "SMLoader 1.5.0 starting".
+It should start with "SMLoader 1.5.1 starting".
 
 UNINSTALL
 ---------

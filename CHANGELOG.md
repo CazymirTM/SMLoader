@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.5.1 — DevCommands fix
+
+- **DevCommands no longer turns off the main quests.** It left the game's
+  developer flag on, so the first quest (and every quest after it) never
+  started, new worlds skipped the intro, and new players got the developer spawn
+  point and items. The flag is now only on while the chat commands are
+  registered. In worlds where the quest never started, it starts the next time
+  you load them.
+- Only the host gets the developer commands now, as documented. Before, players
+  who joined got them too.
+- The loader itself is unchanged apart from its version number. You only need
+  this update if you use DevCommands.
+
 ## 1.5.0 — SMContent and SMAudio
 
 - **SMContent:** mods can add or edit the game's data files in memory (parts,

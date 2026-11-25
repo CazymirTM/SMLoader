@@ -5,7 +5,12 @@
 // How: SurvivalGame.lua only binds those commands when the global
 // g_survivalDev is true, which the game normally only sets for internal dev
 // builds. While SurvivalGame.lua is being compiled we append a few lines that
-// wrap server_onCreate and set the flag first. Nothing on disk is modified.
+// wrap bindChatCommands and set the flag just for that call. Nothing on disk is
+// modified.
+//
+// The flag must not stay on: the game also reads it when a world loads, and
+// then skips the main quests, the intro and the normal start (spawn point and
+// items).
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -22,10 +27,14 @@ static const char* kPatch = R"lua(
 
 -- [SMLoader DevCommands] enable developer commands for the host
 do
-	local sv_onCreate = SurvivalGame.server_onCreate
-	SurvivalGame.server_onCreate = function( self, ... )
+	local bindChatCommands = SurvivalGame.bindChatCommands
+	SurvivalGame.bindChatCommands = function( self, ... )
+		if not sm.isHost then return bindChatCommands( self, ... ) end
+		local dev = g_survivalDev
 		g_survivalDev = true
-		return sv_onCreate( self, ... )
+		local ok, err = pcall( bindChatCommands, self, ... )
+		g_survivalDev = dev
+		if not ok then error( err, 0 ) end
 	end
 end
 )lua";

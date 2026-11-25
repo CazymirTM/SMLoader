@@ -20,7 +20,7 @@ they load, and the screen, for menus and overlays.
 
 ## Install (players)
 
-1. Download `SMLoader-v1.5.0.zip` from **Releases**.
+1. Download `SMLoader-v1.5.1.zip` from **Releases**.
 2. Open your game folder: Steam → right-click Scrap Mechanic → *Manage* →
    *Browse local files*.
 3. Copy `Release\winmm.dll` into the game's `Release` folder (next to
@@ -28,7 +28,7 @@ they load, and the screen, for menus and overlays.
 4. Copy the `SMLoader` folder into the game folder (next to `Release`).
 5. Put mod `.dll` files in `SMLoader\mods\` and start the game normally.
 
-To check it worked, `SMLoader\loader.log` should start with `SMLoader 1.5.0 starting`.
+To check it worked, `SMLoader\loader.log` should start with `SMLoader 1.5.1 starting`.
 **Uninstall:** delete `Release\winmm.dll`. Steam's "verify files" won't remove
 it for you.
 
@@ -184,7 +184,8 @@ Full reference: [docs/API.md](docs/API.md).
   `$SURVIVAL_DATA/Scripts/game/SurvivalPlayer.lua`.
 - **DevCommands** ([examples/DevCommands](examples/DevCommands/DevCommands.cpp)):
   an example of patching a script as it loads. It turns on Survival's built-in
-  developer chat commands in worlds you host.
+  developer chat commands in worlds you host, without touching quests or the
+  normal start.
 
 ---
 
