@@ -15,7 +15,12 @@ INSTALL
 5. Start the game from Steam as usual.
 
 To check it's working, open  SMLoader\loader.log  after starting the game.
-It should start with "SMLoader 1.5.1 starting".
+It should start with "SMLoader 1.6.0 starting".
+
+MOD SETTINGS
+------------
+In a world, press Esc and click MODS. Mods that support it have a page
+there, and SMLoader's own page turns mods on and off.
 
 UNINSTALL
 ---------

@@ -513,23 +513,23 @@ bool PatchStopped(uint8_t* at, const uint8_t* code, size_t n) {
     return done;
 }
 
-bool InlineHook(Target& t, bool* chained) {
-    DWORD old;
-    *chained = memcmp(t.addr, kAbsJump, sizeof kAbsJump) == 0;
+bool HookCode(uint8_t* at, size_t steal, const void* hook, void** original, bool* chained) {
+    *chained = memcmp(at, kAbsJump, sizeof kAbsJump) == 0;
     uint8_t code[32];
     memset(code, 0x90, sizeof code);
-    PutJump(code, (const void*)t.hook);
+    PutJump(code, hook);
     if (*chained) {
-        memcpy((void*)t.original, t.addr + 6, 8);      // the other mod's hook; it calls the game's code
+        memcpy(original, at + 6, 8);                   // the other mod's hook; it calls the game's code
     } else {
         uint8_t* tramp = (uint8_t*)VirtualAlloc(nullptr, 64, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
         if (!tramp) return false;
-        memcpy(tramp, t.addr, t.steal);
-        PutJump(tramp + t.steal, t.addr + t.steal);
+        memcpy(tramp, at, steal);
+        PutJump(tramp + steal, at + steal);
+        DWORD old;
         VirtualProtect(tramp, 64, PAGE_EXECUTE_READ, &old);
-        *t.original = (CacheFn)tramp;
+        *original = tramp;
     }
-    return PatchStopped(t.addr, code, *chained ? 14 : t.steal);
+    return PatchStopped(at, code, *chained ? 14 : steal);
 }
 
 // For functions whose first 14 bytes can't be moved: a 5-byte jump to a stub within
@@ -777,7 +777,7 @@ void Content_Install(const wchar_t* loaderDirW, void (*log)(const char* fmt, ...
     bool chained = false;
     for (auto& t : g_targets) {
         bool c = false;
-        if (!InlineHook(t, &c)) {
+        if (!HookCode(t.addr, t.steal, (const void*)t.hook, (void**)t.original, &c)) {
             Log("content: hooking %s failed", t.name);
             return;
         }
@@ -788,4 +788,11 @@ void Content_Install(const wchar_t* loaderDirW, void (*log)(const char* fmt, ...
         Log("content: the file index was not found - new meshes and textures won't load in this game version");
     Log("content: ready (%zu files, %zu icons)%s", g_byGamePath.size(), g_icons.size(),
         chained ? ", sharing the game's hooks with a mod that has its own" : "");
+}
+
+uint8_t* Code_ScanUnique(const char* sig, size_t steal) { return ScanUnique(sig, steal); }
+
+bool Code_Hook(uint8_t* at, size_t steal, const void* hook, void** original) {
+    bool chained;
+    return HookCode(at, steal, hook, original, &chained);
 }

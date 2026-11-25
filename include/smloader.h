@@ -27,8 +27,8 @@
 extern "C" {
 #endif
 
-#define SMLOADER_API_VERSION 4
-#define SMLOADER_VERSION     "1.5.1"
+#define SMLOADER_API_VERSION 5
+#define SMLOADER_VERSION     "1.6.0"
 
 typedef struct lua_State lua_State;
 typedef double    lua_Number;
@@ -178,6 +178,72 @@ typedef int (*SMExtFn)(const char* argsJson, size_t len, char* out, size_t outSi
    call of the same function. May be called from any thread, one at a time. */
 typedef const char* (*SMContentEditFn)(const char* gamePath, const char* base, size_t len,
                                        size_t* outLen, void* user);
+
+/* --- SMModsMenu (API version 5) -------------------------------------------
+   The MODS page in the pause menu: every mod can have a page of settings
+   there (see docs/MODSMENU.md). SMLoader draws it, saves the values in
+   SMLoader\config\<page>.cfg and tells the mod when the player changes one. */
+
+/* SMMenuOption.type                value                                       */
+#define SMMENU_SECTION 1         /* a heading (label), no value                  */
+#define SMMENU_INFO    2         /* a paragraph of text (label), no value        */
+#define SMMENU_TOGGLE  3         /* on/off: number 0 or 1                        */
+#define SMMENU_SLIDER  4         /* number min..max in steps                     */
+#define SMMENU_CHOICE  5         /* number = index into choices; text = choice   */
+#define SMMENU_TEXT    6         /* text                                         */
+#define SMMENU_KEY     7         /* text = key name ("F5", "" = none); number = its virtual-key code */
+#define SMMENU_COLOR   8         /* text "#RRGGBB"                               */
+#define SMMENU_BUTTON  9         /* no value; SMMENU_CLICKED                     */
+
+/* SMMenuOption.flags */
+#define SMMENU_HOST    1         /* only the host can change it; everyone in the world gets the host's value */
+#define SMMENU_RESTART 2         /* tell the player it applies after a game restart */
+#define SMMENU_CONFIRM 4         /* buttons: ask before SMMENU_CLICKED           */
+
+/* SMMenuEvent.kind */
+#define SMMENU_CHANGED 1         /* the value changed (menu, MenuSet*, or the host's value arrived) */
+#define SMMENU_CLICKED 2         /* a button was clicked                         */
+#define SMMENU_PRESSED 3         /* the key of an SMMENU_KEY option was pressed during play */
+
+typedef struct SMMenuEvent {
+    uint32_t    size;
+    int         kind;
+    const char* page;
+    const char* option;
+    double      number;          /* the current value, as in the table above     */
+    const char* text;
+} SMMenuEvent;
+
+/* Runs on the game thread, or inside MenuSet* on the thread that called it. */
+typedef void (*SMMenuFn)(const SMMenuEvent* e, void* user);
+
+typedef struct SMMenuPage {
+    uint32_t    size;            /* sizeof(SMMenuPage)                           */
+    const char* id;              /* unique: letters, digits, _ - . (also the config file's name) */
+    const char* name;            /* shown in the list                            */
+    const char* version;         /* the rest may be NULL                         */
+    const char* author;
+    const char* description;
+} SMMenuPage;
+
+typedef struct SMMenuOption {
+    uint32_t    size;            /* sizeof(SMMenuOption); zero the struct first  */
+    int         type;            /* SMMENU_*                                     */
+    const char* id;              /* unique in its page (not needed for sections and infos) */
+    const char* label;
+    const char* description;     /* small text under the label, or NULL          */
+    uint32_t    flags;           /* SMMENU_HOST | SMMENU_RESTART | SMMENU_CONFIRM */
+    const char* enabledBy;       /* id of a toggle that must be on ("!id": off), or NULL */
+    double      defNumber;       /* default of toggles, sliders and choices (index) */
+    const char* defText;         /* default of texts, keys and colors            */
+    double      min, max, step;  /* sliders; step 0 = any value                  */
+    const char* format;          /* sliders: how to show the number, e.g. "%.1fx" (NULL = automatic) */
+    const char* const* choices;  /* choices: NULL-terminated array               */
+    int         maxLength;       /* texts: 0 = 64 characters                     */
+    const char* caption;         /* buttons: text on the button (NULL = "RUN")   */
+    SMMenuFn    fn;              /* called when something happens, or NULL       */
+    void*       user;
+} SMMenuOption;
 
 typedef struct SMNetStatus {
     int  inWorld;          /* SMNetworking is running in the current world        */
@@ -357,6 +423,31 @@ typedef struct SMLoaderAPI {
        copied) under a name such as "mymod.shot". Lua plays it with
        SMAudio.play (see docs/AUDIO.md). Call from SMMod_Init. */
     int  (*AudioAdd)(const char* name, const void* data, size_t len);
+
+    /* ---- API version 5 (SMLoader 1.6.0): SMModsMenu ------------------------
+       A page of settings in the pause menu's MODS page (docs/MODSMENU.md).
+       Call MenuAddPage and MenuAddOption from SMMod_Init; everything is copied.
+       Adding an option id again replaces it. Both return nonzero on success.
+
+       Values can be read right away (saved values are loaded from disk), from
+       any thread. MenuGetNumber: the value, or `fallback` if there is none.
+       MenuGetText copies the text form (NUL-terminated, truncated to size) and
+       returns its full length, or -1. Both also read pages of Lua mods once a
+       value has been saved.
+
+       MenuSetNumber / MenuSetText change a value as if the player had: it is
+       saved and the option's fn runs. They return 0 if the value doesn't fit
+       the option, or if the option follows another player's host.
+
+       MenuOpen shows the MODS page (pageId NULL or "": the last one shown);
+       returns 0 if no world is loaded. All functions are thread-safe. */
+    int    (*MenuAddPage)(const SMMenuPage* page);
+    int    (*MenuAddOption)(const char* pageId, const SMMenuOption* option);
+    double (*MenuGetNumber)(const char* pageId, const char* optionId, double fallback);
+    int    (*MenuGetText)(const char* pageId, const char* optionId, char* out, size_t size);
+    int    (*MenuSetNumber)(const char* pageId, const char* optionId, double value);
+    int    (*MenuSetText)(const char* pageId, const char* optionId, const char* text);
+    int    (*MenuOpen)(const char* pageId);
 } SMLoaderAPI;
 
 typedef void (*SMMod_InitFn)(const SMLoaderAPI* api);

@@ -70,6 +70,23 @@ They came from the import table, from strings and code in the binary
 - SMLoader (`EnableAchievements`) replaces only the copy. The checksum, the
   game's own byte and the per-game-mode rules are left alone.
 
+## Pause menu
+
+- `InGameMainMenu2` loads `$GAME_DATA/Gui/Layouts/InGameMenu/InGameMenu.layout`
+  (panels `NormalPanel`, `ChallengePanel`, `ChallengeBuilderPanel`), keeps the root
+  widget at `+8`, finds each button by name (`MyGUI::Widget::findWidget`) and adds
+  two delegates to it: click (`eventMouseButtonClick`, widget `+0xF8`) and hover
+  (`eventMouseSetFocus`, `+0x88`). Our button gets the same two.
+- GUI texts come from one loader that returns `Buffer { data, size, owned }`
+  (`owned` is false when data points into a `.cbo` cache). Changing the buffer
+  there comes after the game's file checksums; an SMContent edit of the same file
+  comes before and makes the game count one modified core file.
+- `sm.jsonGui` covers everything an options page needs: `ScrollViewPanel` (wheel,
+  scroll bar, keeps its position between renders), `Button` with `onPressed` /
+  `onDrag` / `onReleased`, `EditBox` with `onTextEdit` / `onTextEnter`. Coordinates
+  are in a 1280x720 space. A widget with `NeedMouse = false` hides its children
+  from the mouse unless `InheritsPick = true`.
+
 ## Client packets
 
 - `NetworkClient` keeps the last server tick it processed (`+0x120`) and the

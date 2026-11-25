@@ -11,7 +11,8 @@ they load, and the screen, for menus and overlays.
   player stats and progression ([guide](docs/PLAYERDATA.md)), and **SMEvents**, one
   event bus shared by Lua and C++ ([guide](docs/EVENTS.md)), and **SMExtensions**,
   more functionality for Lua: native functions, timers, hotkeys and per-mod files
-  ([guide](docs/EXTENSIONS.md)).
+  ([guide](docs/EXTENSIONS.md)), and **SMModsMenu**, a settings page for your mod
+  in the game's pause menu ([guide](docs/MODSMENU.md)).
 
 > Built for **Scrap Mechanic 1.0.7a** (Steam, Windows x64). Not affiliated
 > with or endorsed by Axolot Games.
@@ -20,7 +21,7 @@ they load, and the screen, for menus and overlays.
 
 ## Install (players)
 
-1. Download `SMLoader-v1.5.1.zip` from **Releases**.
+1. Download `SMLoader-v1.6.0.zip` from **Releases**.
 2. Open your game folder: Steam → right-click Scrap Mechanic → *Manage* →
    *Browse local files*.
 3. Copy `Release\winmm.dll` into the game's `Release` folder (next to
@@ -28,7 +29,14 @@ they load, and the screen, for menus and overlays.
 4. Copy the `SMLoader` folder into the game folder (next to `Release`).
 5. Put mod `.dll` files in `SMLoader\mods\` and start the game normally.
 
-To check it worked, `SMLoader\loader.log` should start with `SMLoader 1.5.1 starting`.
+To check it worked, `SMLoader\loader.log` should start with `SMLoader 1.6.0 starting`.
+
+**Change mod settings in the game:** press Esc and click **MODS**. Every mod that
+supports it has its own page there. SMLoader's page has the switches from
+`loader.ini` and turns mods on and off.
+
+![The MODS page](docs/modsmenu.jpg)
+
 **Uninstall:** delete `Release\winmm.dll`. Steam's "verify files" won't remove
 it for you.
 
@@ -41,6 +49,7 @@ Scrap Mechanic\
 │  └─ winmm.dll          ← SMLoader
 └─ SMLoader\
    ├─ mods\              ← mod DLLs
+   ├─ config\            ← settings from the MODS page
    ├─ overrides\         ← optional script replacements (see below)
    ├─ loader.ini         ← created on first run
    └─ loader.log         ← what happened (and crash reports)
@@ -140,6 +149,7 @@ rename it, and build.
 | `ContentAdd` / `ContentEdit` / `ContentAddIcon` | **SMContent**: add items, recipes, texts and icons to the game in memory ([guide](docs/CONTENT.md)) |
 | `AudioAdd` | **SMAudio**: play your own sound files in 3D through the game's sound engine, from Lua with `SMAudio.play` ([guide](docs/AUDIO.md)) |
 | `DataGet` / `DataSet` / `DataAdd` / `DataAddXP` / `DataUnlock` | **SMPlayerData**: per-player stats, mod data, XP and unlocks saved in the world. Lua mods use the `SMData` table ([guide](docs/PLAYERDATA.md)) |
+| `MenuAddPage` / `MenuAddOption` / `MenuGetNumber` / ... | **SMModsMenu**: your mod's settings in the pause menu's MODS page, saved for you. Lua mods use the `SMModsMenu` table ([guide](docs/MODSMENU.md)) |
 | `NetRegister` / `NetOn` / `NetSend` / `NetGetStatus` | **SMNetworking**: multiplayer messages, a roster and the "does everyone have my mod?" check. Lua mods use the `SMNet` table instead ([guide](docs/NETWORKING.md)) |
 
 Full reference: [docs/API.md](docs/API.md).

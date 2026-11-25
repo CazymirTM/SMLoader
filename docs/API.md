@@ -1,4 +1,4 @@
-# SMLoader API reference (API version 4)
+# SMLoader API reference (API version 5)
 
 - API version 2 (SMLoader 1.1.0) added `AddCallbackHook` and SMNetworking
   (`NetRegister`, `NetOn`, `NetSend`, `NetGetStatus`).
@@ -202,6 +202,19 @@ int AudioAdd(const char* name, const void* data, size_t len);   // Lua: SMAudio.
 ```
 - Your own sound files, played by the game's sound engine.
 - The full guide is in [AUDIO.md](AUDIO.md).
+
+## SMModsMenu (API v5)
+
+Settings pages in the pause menu; see [MODSMENU.md](MODSMENU.md).
+
+| Function | |
+|---|---|
+| `int MenuAddPage(const SMMenuPage*)` | Add or update a page. From `SMMod_Init` |
+| `int MenuAddOption(pageId, const SMMenuOption*)` | Add an option, or replace the one with the same id |
+| `double MenuGetNumber(pageId, optionId, fallback)` | Current value as a number |
+| `int MenuGetText(pageId, optionId, out, size)` | Current value as text; returns its length or -1 |
+| `int MenuSetNumber(...)`, `int MenuSetText(...)` | Change a value as if the player had; 0 if it doesn't fit |
+| `int MenuOpen(pageId)` | Show the MODS page; 0 if no world is loaded |
 
 ## Lua environments
 

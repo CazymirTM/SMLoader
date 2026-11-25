@@ -33,6 +33,7 @@
 #include "fixes/fixes.h"
 #include "content/content.h"
 #include "audio/audio.h"
+#include "menu/menu.h"
 #include "forwards.inc"   // #pragma comment(linker, "/export:...") forwarders
 
 #pragma comment(lib, "d3d11.lib")
@@ -192,6 +193,8 @@ struct StateExt {
     bool smextFailed = false;
     int smaudioRef = -2;               // registry ref to the installed SMAudio table
     bool smaudioFailed = false;
+    int smmenuRef = -2;                // registry ref to the installed SMModsMenu table
+    bool smmenuFailed = false;
     bool smeventsFailed = false;
     bool smdataFailed = false;         // don't retry a broken install every second
 };
@@ -556,6 +559,7 @@ static int Api_AddCallbackHook(const char* callback, const char* handler) {
 #include "smdata_lua.inc"  // kSMDataLua, kSMDataLuaSize (SMPlayerData)
 #include "smaudio_lua.inc" // kSMAudioLua, kSMAudioLuaSize (SMAudio)
 #include "smext_lua.inc"   // kSMExtLua, kSMExtLuaSize (SMExtensions)
+#include "smmenu_lua.inc"  // kSMMenuLua, kSMMenuLuaSize (SMModsMenu)
 
 struct NetHandlerEntry { std::string mod, msg; int side; SMNetHandler fn; void* user; };
 static std::mutex g_netMutex;                          // guards everything below
@@ -807,8 +811,15 @@ static void EnsureSMNet(lua_State* L, int env) {
         else
             ext->smaudioFailed = true;
     }
+    if (!ext->smmenuFailed && !SDKInstalled(L, env, "SMModsMenu")) {
+        if (InstallSDK(L, env, "SMModsMenu", kSMMenuLua, kSMMenuLuaSize, "=SMModsMenu", &ext->smmenuRef, Menu_PushNatives))
+            Log("SMModsMenu installed in state %p", (void*)L);
+        else
+            ext->smmenuFailed = true;
+    }
     CallSMNet(L, "__scan", [](lua_State*) { return 0; });
     CallSMData(L, "__scan", [](lua_State*) { return 0; });
+    CallSDK(L, ext->smmenuRef, "SMModsMenu", "__scan", [](lua_State*) { return 0; });
 }
 
 // Queue `fn` on the state SMNet runs in. Returns false if there is none.
@@ -822,6 +833,18 @@ static bool QueueNetJob(std::function<void(lua_State*)> fn) {
     s->jobs.push_back({std::move(fn)});
     ++g_pendingJobs;
     return true;
+}
+
+static bool CallMenuLua(const char* fn, const char* page, const char* option) {
+    std::string f = fn, p = page, o = option;
+    return QueueNetJob([f, p, o](lua_State* L) {
+        StateExt* ext = GetExt(L);
+        if (ext) CallSDK(L, ext->smmenuRef, "SMModsMenu", f.c_str(), [&](lua_State* l) {
+            g_lua.lua_pushstring(l, p.c_str());
+            g_lua.lua_pushstring(l, o.c_str());
+            return 2;
+        });
+    });
 }
 
 static void NetAddMod(const std::string& mod, const std::string& version) {
@@ -1604,6 +1627,9 @@ static void EnableAchievements() {
 static SMLoaderAPI g_api{};
 static std::vector<HMODULE> g_mods;
 
+static void LoadModFiles(std::vector<std::string>& files);
+static void AddLoaderPage(const std::vector<std::string>& files);
+
 static void LoadMods() {
     g_api.version = SMLOADER_API_VERSION;
     g_api.loaderDir = g_loaderDirU8.c_str();
@@ -1639,21 +1665,39 @@ static void LoadMods() {
     g_api.ContentEdit = Content_Edit;
     g_api.ContentAddIcon = Content_AddIcon;
     g_api.AudioAdd = Audio_Add;
+    g_api.MenuAddPage = Menu_AddPage;
+    g_api.MenuAddOption = Menu_AddOption;
+    g_api.MenuGetNumber = Menu_GetNumber;
+    g_api.MenuGetText = Menu_GetText;
+    g_api.MenuSetNumber = Menu_SetNumber;
+    g_api.MenuSetText = Menu_SetText;
+    g_api.MenuOpen = Menu_Open;
 
     EnableAchievements();
     InstallGameFixes((g_loaderDirW + L"\\loader.ini").c_str(), Log);
 
     Audio_Init(&g_lua, Log, Api_PatchImport);
+    Menu_Init({&g_lua, g_loaderDirW.c_str(), Log, CallMenuLua});
 
-    if (!g_cfg.loadMods) { Log("LoadMods=0, skipping native mods"); return; }
+    std::vector<std::string> files;
+    LoadModFiles(files);
+    AddLoaderPage(files);
+    Menu_InstallButton();
+    Content_Install(g_loaderDirW.c_str(), Log, Api_PatchImport);   // after the mods, so it chains to their hooks
+}
 
-    std::wstring pattern = g_loaderDirW + L"\\mods\\*.dll";
+static void LoadModFiles(std::vector<std::string>& files) {
+    std::wstring pattern = g_loaderDirW + L"\\mods\\*.dll", ini = g_loaderDirW + L"\\loader.ini";
     WIN32_FIND_DATAW fd;
     HANDLE h = FindFirstFileW(pattern.c_str(), &fd);
+    if (!g_cfg.loadMods) Log("LoadMods=0, skipping native mods");
     if (h == INVALID_HANDLE_VALUE) { Log("no mods in %s\\mods", g_loaderDirU8.c_str()); return; }
     do {
         std::wstring path = g_loaderDirW + L"\\mods\\" + fd.cFileName;
         std::string name = ToUtf8(fd.cFileName);
+        files.push_back(name);
+        if (!g_cfg.loadMods) continue;
+        if (GetPrivateProfileIntW(L"disabled", fd.cFileName, 0, ini.c_str())) { Log("mod %s: turned off in the MODS page", name.c_str()); continue; }
         HMODULE m = LoadLibraryExW(path.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
         if (!m) { Log("mod %s: LoadLibrary failed (error %lu)", name.c_str(), GetLastError()); continue; }
         auto init = (SMMod_InitFn)GetProcAddress(m, "SMMod_Init");
@@ -1665,7 +1709,72 @@ static void LoadMods() {
     } while (FindNextFileW(h, &fd));
     FindClose(h);
     Log("%zu native mod(s) loaded", g_mods.size());
-    Content_Install(g_loaderDirW.c_str(), Log, Api_PatchImport);   // after the mods, so it chains to their hooks
+}
+
+// SMLoader's own page in the MODS menu: loader.ini as switches.
+static void AddLoaderPage(const std::vector<std::string>& files) {
+    static const char* kPage = "smloader";
+    static std::wstring ini = g_loaderDirW + L"\\loader.ini";
+    SMMenuPage page{sizeof(SMMenuPage), kPage, "SMLoader", SMLOADER_VERSION, "CeZeY22",
+                    "The mod loader. Every mod with settings has its own page in this list."};
+    Menu_AddPage(&page);
+
+    struct Item { const wchar_t* section; const wchar_t* key; const char* id; const char* label; const char* desc; int def; bool restart; };
+    auto add = [](int type, const char* id, const char* label, const char* desc, bool def, bool restart, SMMenuFn fn, void* user) {
+        SMMenuOption o{};
+        o.size = sizeof o;
+        o.type = type;
+        o.id = id;
+        o.label = label;
+        o.description = desc;
+        o.defNumber = def;
+        o.flags = restart ? SMMENU_RESTART : 0;
+        o.fn = fn;
+        o.user = user;
+        Menu_AddOption(kPage, &o);
+    };
+    auto write = [](const SMMenuEvent* e, void* user) {
+        auto it = (const Item*)user;
+        WritePrivateProfileStringW(it->section, it->key, e->number != 0 ? L"1" : L"0", ini.c_str());
+        if (!wcscmp(it->key, L"LogScriptLoads")) g_cfg.logScriptLoads = e->number != 0;
+        if (!wcscmp(it->key, L"EnableOverrides")) g_cfg.enableOverrides = e->number != 0;
+    };
+    auto items = [&](const char* title, const Item* list, size_t n) {
+        add(SMMENU_SECTION, "", title, nullptr, false, false, nullptr, nullptr);
+        for (size_t i = 0; i < n; ++i) {
+            const Item& it = list[i];
+            Menu_SeedExternal(kPage, it.id, GetPrivateProfileIntW(it.section, it.key, it.def, ini.c_str()) != 0);
+            add(SMMENU_TOGGLE, it.id, it.label, it.desc, it.def != 0, it.restart, write, (void*)&it);
+        }
+    };
+    static const Item game[] = {
+        {L"fixes", L"FastPhysics", "FastPhysics", "Fast physics", "A faster physics solver for big creations, same results.", 1, true},
+        {L"fixes", L"NetworkFix", "NetworkFix", "Network fix", "Smoother play in someone else's world.", 1, true},
+        {L"loader", L"Achievements", "Achievements", "Steam achievements", "Keep them working while mods add things to the game.", 1, true},
+    };
+    static const Item dev[] = {
+        {L"loader", L"LogScriptLoads", "LogScriptLoads", "Log script loading", "Write every script the game loads to loader.log.", 0, false},
+        {L"loader", L"EnableOverrides", "EnableOverrides", "Script overrides", "Use replacement scripts from SMLoader\\overrides.", 1, false},
+    };
+    items("GAME", game, std::size(game));
+
+    static std::vector<std::wstring> names;            // the handlers point into it
+    names.reserve(files.size());
+    if (!files.empty()) {
+        add(SMMENU_SECTION, "", "INSTALLED MODS", nullptr, false, false, nullptr, nullptr);
+        add(SMMENU_INFO, "", "A mod that is off is not loaded the next time the game starts. Things it adds to a world come back when you turn it on again.",
+            nullptr, false, false, nullptr, nullptr);
+    }
+    for (auto& f : files) {
+        names.push_back(ToWide(f));
+        std::string label = f.substr(0, f.size() > 4 ? f.size() - 4 : f.size()), id = "mod." + std::to_string(names.size());
+        Menu_SeedExternal(kPage, id.c_str(), GetPrivateProfileIntW(L"disabled", names.back().c_str(), 0, ini.c_str()) == 0);
+        add(SMMENU_TOGGLE, id.c_str(), label.c_str(), nullptr, true, true, [](const SMMenuEvent* e, void* user) {
+            // on = no entry at all, so the section only lists what is off
+            WritePrivateProfileStringW(L"disabled", ((const std::wstring*)user)->c_str(), e->number != 0 ? nullptr : L"1", ini.c_str());
+        }, &names.back());
+    }
+    items("FOR MOD MAKERS", dev, std::size(dev));
 }
 
 // ---------------------------------------------------------------------------
@@ -1744,6 +1853,7 @@ static void Hook_lua_close(lua_State* L) {
         }
     }
     if (worldClosed) Audio_StopAll();
+    if (worldClosed) Menu_WorldClosed();
     if (worldClosed) DispatchNativeEvent("world.closed", "null", 0, 0);   // native only: Lua is going away
     for (auto& j : orphaned) if (j.done) j.done(0, "the Lua state was closed", j.user);
     o_lua_close(L);
@@ -1921,6 +2031,7 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID) {
                 std::call_once(g_modsOnce, LoadMods); return 0; }, nullptr, 0, nullptr))
             CloseHandle(t);
     } else if (reason == DLL_PROCESS_DETACH && g_log) {
+        Menu_Flush();
         Log("SMLoader shutting down");
         if (g_log) { fclose(g_log); g_log = nullptr; }
     }

@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.6.0 — SMModsMenu
+
+- **A MODS button in the pause menu**, under UNSTUCK (in Challenge mode under
+  RESTART). It opens a page in the style of the game's Options where every mod
+  can have its own settings.
+- **SMModsMenu SDK** for mod makers: on/off, sliders, choices, texts, keys,
+  colours, buttons, headings and paragraphs, from Lua (`SMModsMenu`) or C++
+  (`MenuAddPage`, `MenuAddOption`, ..., API version 5). Values are saved in
+  `SMLoader\config\`. Options can depend on each other, follow the host in co-op,
+  or ask for a restart. See [docs/MODSMENU.md](docs/MODSMENU.md) and the MenuDemo
+  example.
+- **SMLoader's own page:** the switches from `loader.ini`, and one for every
+  installed mod to turn it on or off.
+- The button needs no changed game files: a loader without mods still counts as
+  an unmodified game.
+- Existing mods keep working unchanged.
+
 ## 1.5.1 — DevCommands fix
 
 - **DevCommands no longer turns off the main quests.** It left the game's
